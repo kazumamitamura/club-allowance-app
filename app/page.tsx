@@ -5,13 +5,14 @@ import { createClient } from '@/utils/supabase/client'
 import { useRouter } from 'next/navigation'
 import Calendar from 'react-calendar'
 import 'react-calendar/dist/Calendar.css'
-// 作成した計算ロジックを読み込み
 import { ACTIVITY_TYPES, DESTINATIONS, calculateAmount } from '@/utils/allowanceRules'
 
-// 管理者リスト
-const ADMIN_EMAILS = ['mitamuraka@haguroko.ed.jp'] 
+// ★管理者のメールアドレスリスト
+const ADMIN_EMAILS = [
+  'mitamuraka@haguroko.ed.jp',
+  'tomonoem@haguroko.ed.jp'
+]
 
-// 型定義の拡張
 type Allowance = {
   id: number
   user_id: string
@@ -40,7 +41,7 @@ export default function Home() {
   // 入力フォームの状態
   const [selectedDate, setSelectedDate] = useState<Date>(new Date())
   const [dayType, setDayType] = useState<string>('---') // 勤務形態
-  const [activityId, setActivityId] = useState<string>('A')
+  const [activityId, setActivityId] = useState<string>('') // 初期値は空にする
   const [destinationId, setDestinationId] = useState<string>('school')
   const [destinationDetail, setDestinationDetail] = useState('')
   const [isDriving, setIsDriving] = useState(false)
@@ -50,7 +51,6 @@ export default function Home() {
   // ユーザー情報
   const [userEmail, setUserEmail] = useState('')
 
-  // 初期ロード
   useEffect(() => {
     const init = async () => {
       const { data: { user } } = await supabase.auth.getUser()
@@ -61,34 +61,36 @@ export default function Home() {
     init()
   }, [])
 
-  // 日付が変わったら「勤務区分」をデータベースから取得
+  // 日付が変わったら「勤務区分」を取得
   useEffect(() => {
     const updateDayInfo = async () => {
       const dateStr = formatDate(selectedDate)
-      
-      // school_calendarテーブルから検索
       const { data } = await supabase
         .from('school_calendar')
         .select('day_type')
         .eq('date', dateStr)
         .single()
       
-      // データがあればそれを表示、なければ「未登録」または曜日判定
-      if (data) {
-        setDayType(data.day_type)
-      } else {
-        // カレンダーデータがない場合の予備ロジック（土日判定）
-        const day = selectedDate.getDay()
-        setDayType(day === 0 || day === 6 ? '休日(仮)' : '勤務日(仮)')
-      }
+      const type = data?.day_type || (selectedDate.getDay() % 6 === 0 ? '休日(仮)' : '勤務日(仮)')
+      setDayType(type)
+      
+      // 日付が変わったら、不適切な選択肢をリセットする
+      setActivityId('') 
     }
     updateDayInfo()
   }, [selectedDate])
 
-  // 入力値が変わるたびに金額を自動計算（utilsのロジックを使用）
+  // 金額自動計算
   useEffect(() => {
-    // "勤務日"という文字が含まれていれば勤務日扱いとする
-    const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業日')
+    // "勤務日"や"授業"が含まれていれば勤務日扱い
+    const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
+    
+    // activityIdが空の場合は0円
+    if (!activityId) {
+      setCalculatedAmount(0)
+      return
+    }
+
     const amt = calculateAmount(activityId, isDriving, destinationId, isWorkDay)
     setCalculatedAmount(amt)
   }, [activityId, isDriving, destinationId, dayType])
@@ -100,11 +102,15 @@ export default function Home() {
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (!activityId) {
+      alert('業務内容を選択してください')
+      return
+    }
+    
     const dateStr = formatDate(selectedDate)
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
 
-    // 保存処理
     const { error } = await supabase.from('allowances').insert({
       user_id: user.id,
       user_email: user.email,
@@ -127,7 +133,32 @@ export default function Home() {
     if (!error) fetchAllowances()
   }
 
-  // 今月の合計計算
+  // ★重要: 勤務形態に応じて選択肢をフィルタリング
+  const getFilteredActivities = () => {
+    const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
+    
+    return ACTIVITY_TYPES.filter(type => {
+      // 勤務日の場合、休日用の業務（A, B）は除外
+      if (isWorkDay) {
+        if (type.id === 'A' || type.id === 'B') return false
+      }
+      return true
+    })
+  }
+
+  // 表示月の変更操作
+  const handlePrevMonth = () => {
+    const newDate = new Date(selectedDate)
+    newDate.setMonth(selectedDate.getMonth() - 1)
+    setSelectedDate(newDate)
+  }
+  const handleNextMonth = () => {
+    const newDate = new Date(selectedDate)
+    newDate.setMonth(selectedDate.getMonth() + 1)
+    setSelectedDate(newDate)
+  }
+
+  // 表示中の月の合計
   const calculateMonthTotal = () => {
     const targetMonth = selectedDate.getMonth()
     const targetYear = selectedDate.getFullYear()
@@ -139,6 +170,7 @@ export default function Home() {
       .reduce((sum, item) => sum + item.amount, 0)
   }
 
+  // カレンダーのドット表示
   const getTileContent = ({ date, view }: { date: Date; view: string }) => {
     if (view !== 'month') return null
     const dateStr = formatDate(date)
@@ -156,27 +188,41 @@ export default function Home() {
         </div>
       )}
 
-      {/* ヘッダー */}
-      <div className="bg-white px-6 py-6 rounded-b-3xl shadow-sm mb-6 sticky top-0 z-10">
-        <div className="flex justify-between items-start">
-          <div>
-            <p className="text-sm text-slate-500 font-bold">
-              {selectedDate.getFullYear()}年{selectedDate.getMonth() + 1}月
-            </p>
-            <h1 className="text-3xl font-extrabold text-slate-800">
-              ¥{calculateMonthTotal().toLocaleString()}
-            </h1>
+      {/* スタイリッシュなヘッダー（月切り替え付き） */}
+      <div className="bg-white px-6 py-4 rounded-b-3xl shadow-sm mb-6 sticky top-0 z-10">
+        <div className="flex flex-col items-center">
+          
+          {/* 月切り替えコントロール */}
+          <div className="flex items-center gap-4 mb-2">
+            <button onClick={handlePrevMonth} className="text-slate-400 hover:text-blue-600 p-2 text-xl font-bold">
+              ‹
+            </button>
+            <h2 className="text-sm text-slate-500 font-bold">
+              {selectedDate.getFullYear()}年 {selectedDate.getMonth() + 1}月
+            </h2>
+            <button onClick={handleNextMonth} className="text-slate-400 hover:text-blue-600 p-2 text-xl font-bold">
+              ›
+            </button>
           </div>
-          <p className="text-xs text-slate-400 self-center">{dayType}</p>
+
+          <h1 className="text-4xl font-extrabold text-slate-800 tracking-tight">
+            ¥{calculateMonthTotal().toLocaleString()}
+          </h1>
+          <p className="text-xs text-slate-300 mt-1">{userEmail}</p>
         </div>
       </div>
 
       <div className="px-4 max-w-md mx-auto space-y-6">
+        
         {/* カレンダー */}
         <div className="bg-white p-4 rounded-3xl shadow-sm">
+          {/* カレンダー自体のナビゲーションは隠して、上のヘッダーで操作するスタイルでも良いが、
+              機能維持のため標準表示のままにします。activeStartDateを制御すれば連動可能です */}
           <Calendar
             onChange={(val) => setSelectedDate(val as Date)}
             value={selectedDate}
+            activeStartDate={selectedDate} // これでヘッダー操作とカレンダー表示が連動します
+            onActiveStartDateChange={({ activeStartDate }) => activeStartDate && setSelectedDate(activeStartDate)}
             locale="ja-JP"
             tileContent={getTileContent}
             className="w-full border-none"
@@ -187,7 +233,7 @@ export default function Home() {
         <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
           <div className="flex justify-between items-center mb-4 border-b pb-2">
             <h2 className="font-bold text-slate-700 text-sm">
-              {selectedDate.getMonth() + 1}/{selectedDate.getDate()} の実績登録
+              {selectedDate.getMonth() + 1}/{selectedDate.getDate()} 実績登録
             </h2>
             <span className={`text-xs px-2 py-1 rounded font-bold ${dayType.includes('休日') || dayType.includes('週休') ? 'bg-red-100 text-red-600' : 'bg-blue-100 text-blue-600'}`}>
               {dayType}
@@ -196,7 +242,7 @@ export default function Home() {
 
           <form onSubmit={handleAdd} className="flex flex-col gap-4">
             
-            {/* ① 業務内容 */}
+            {/* ① 業務内容（フィルタリング適用） */}
             <div>
               <label className="block text-xs font-bold text-slate-500 mb-1">業務内容</label>
               <select 
@@ -204,10 +250,15 @@ export default function Home() {
                 onChange={(e) => setActivityId(e.target.value)}
                 className="w-full bg-slate-100 p-3 rounded-lg outline-none font-bold text-slate-700 text-sm"
               >
-                {ACTIVITY_TYPES.map(type => (
+                <option value="">選択してください</option>
+                {getFilteredActivities().map(type => (
                   <option key={type.id} value={type.id}>{type.label}</option>
                 ))}
               </select>
+              {/* 入力制限のメッセージ */}
+              {dayType.includes('勤務日') && (
+                <p className="text-[10px] text-orange-400 mt-1 text-right">※勤務日のため一部の項目は選択できません</p>
+              )}
             </div>
 
             {/* ② 目的地 */}
@@ -254,37 +305,47 @@ export default function Home() {
               <span className="text-xl font-bold">¥{calculatedAmount.toLocaleString()}</span>
             </div>
 
-            <button type="submit" className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 shadow-md">
+            <button type="submit" className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed" disabled={!activityId}>
               登録する
             </button>
           </form>
         </div>
         
-        {/* 履歴リスト */}
-        <div className="space-y-2">
+        {/* 履歴リスト（選択月のデータのみ表示） */}
+        <div className="space-y-2 pb-10">
+            <h3 className="font-bold text-slate-400 text-xs px-2">{selectedDate.getMonth() + 1}月の履歴</h3>
             {allowances.filter(item => {
                 const d = new Date(item.date);
                 return d.getMonth() === selectedDate.getMonth() && d.getFullYear() === selectedDate.getFullYear();
-            }).map((item) => (
-              <div key={item.id} className="bg-white p-3 rounded-xl shadow-sm flex justify-between items-center">
-                <div className="flex items-center gap-3">
-                  <div className="text-center min-w-[40px]">
-                    <span className="block text-xs text-slate-400">{item.date.split('-')[1]}/</span>
-                    <span className="block font-bold text-slate-700">{item.date.split('-')[2]}</span>
-                  </div>
-                  <div>
-                    <p className="text-xs font-bold text-slate-700 line-clamp-1">{item.activity_type}</p>
-                    <p className="text-[10px] text-slate-400">
-                      {item.destination_type} {item.is_driving ? '🚗' : ''} {item.is_accommodation ? '🏨' : ''}
-                    </p>
-                  </div>
+            }).length === 0 ? (
+                <p className="text-center text-slate-300 text-sm py-4">履歴はありません</p>
+            ) : (
+                allowances
+                .filter(item => {
+                    const d = new Date(item.date);
+                    return d.getMonth() === selectedDate.getMonth() && d.getFullYear() === selectedDate.getFullYear();
+                })
+                .map((item) => (
+                <div key={item.id} className="bg-white p-3 rounded-xl shadow-sm flex justify-between items-center border border-slate-100">
+                    <div className="flex items-center gap-3">
+                    <div className="text-center min-w-[40px]">
+                        <span className="block text-xs text-slate-400">{item.date.split('-')[1]}/</span>
+                        <span className="block font-bold text-slate-700">{item.date.split('-')[2]}</span>
+                    </div>
+                    <div>
+                        <p className="text-xs font-bold text-slate-700 line-clamp-1">{item.activity_type}</p>
+                        <p className="text-[10px] text-slate-400">
+                        {item.destination_type} {item.is_driving ? '🚗' : ''} {item.is_accommodation ? '🏨' : ''}
+                        </p>
+                    </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                    <span className="font-bold text-slate-700 text-sm">¥{item.amount.toLocaleString()}</span>
+                    <button onClick={() => handleDelete(item.id)} className="text-slate-300 hover:text-red-500 p-2">🗑</button>
+                    </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="font-bold text-slate-700 text-sm">¥{item.amount.toLocaleString()}</span>
-                  <button onClick={() => handleDelete(item.id)} className="text-slate-300 hover:text-red-500">🗑</button>
-                </div>
-              </div>
-            ))}
+                ))
+            )}
         </div>
       </div>
     </div>

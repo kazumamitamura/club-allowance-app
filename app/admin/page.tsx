@@ -82,6 +82,12 @@ export default function AdminPage() {
     setLoading(false)
   }
 
+  // ログアウト処理（追加）
+  const handleLogout = async () => {
+    await supabase.auth.signOut()
+    router.push('/login')
+  }
+
   // フィルタリング（教員 AND 選択した月）
   const filteredData = allowances.filter(item => {
     const isUserMatch = selectedUser ? item.user_email === selectedUser : false
@@ -125,6 +131,10 @@ export default function AdminPage() {
         <div className="flex justify-between items-center mb-6">
           <h1 className="text-2xl font-bold text-slate-800">事務担当者用 管理画面</h1>
           <div className="flex gap-2">
+            {/* ログアウトボタン（追加） */}
+            <button onClick={handleLogout} className="bg-slate-200 text-slate-600 px-4 py-2 rounded hover:bg-slate-300 text-sm font-bold mr-2">
+              ログアウト
+            </button>
             <button onClick={() => router.push('/admin/calendar')} className="bg-blue-600 text-white px-4 py-2 rounded shadow hover:bg-blue-700 text-sm font-bold">
               📅 年間予定登録へ
             </button>
