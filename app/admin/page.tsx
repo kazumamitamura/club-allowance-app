@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/utils/supabase/client'
 import { useRouter } from 'next/navigation'
+import * as XLSX from 'xlsx' // Excel出力用ライブラリ
 
 type Allowance = {
   id: number
@@ -17,8 +18,8 @@ export default function AdminPage() {
   const supabase = createClient()
   
   const [allowances, setAllowances] = useState<Allowance[]>([])
-  const [users, setUsers] = useState<string[]>([]) // 教員のリスト
-  const [selectedUser, setSelectedUser] = useState<string>('') // 選んだ教員
+  const [users, setUsers] = useState<string[]>([])
+  const [selectedUser, setSelectedUser] = useState<string>('')
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -34,29 +35,48 @@ export default function AdminPage() {
   }, [])
 
   const fetchAllData = async () => {
-    // 全員のデータを取得（RLS設定により、管理者のみ取得できる）
     const { data, error } = await supabase
       .from('allowances')
       .select('*')
       .order('date', { ascending: false })
 
     if (error) {
-      alert('データ取得エラー: あなたには管理者権限がない可能性があります。\n' + error.message)
+      alert('データ取得エラー: ' + error.message)
     } else {
       setAllowances(data || [])
-      // 重複なしのユーザーリストを作成
       const uniqueUsers = Array.from(new Set(data?.map(item => item.user_email).filter(Boolean) as string[]))
       setUsers(uniqueUsers)
     }
     setLoading(false)
   }
 
-  // 選択された教員のデータだけにする
   const filteredData = selectedUser 
     ? allowances.filter(item => item.user_email === selectedUser)
     : []
 
   const totalAmount = filteredData.reduce((sum, item) => sum + item.amount, 0)
+
+  // Excelダウンロード機能
+  const handleDownloadExcel = () => {
+    if (!selectedUser || filteredData.length === 0) return
+
+    // 1. ダウンロード用にデータを日本語に変換する
+    const excelData = filteredData.map(item => ({
+      日付: item.date,
+      業務内容: item.activity_type,
+      金額: item.amount,
+      メールアドレス: item.user_email
+    }))
+
+    // 2. シートを作成
+    const worksheet = XLSX.utils.json_to_sheet(excelData)
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, worksheet, "実績一覧")
+
+    // 3. ファイル名を決めてダウンロード実行
+    // 例: mitamuraka@..._特殊勤務手当実績.xlsx
+    XLSX.writeFile(workbook, `${selectedUser}_特殊勤務手当実績.xlsx`)
+  }
 
   if (loading) return <div className="p-10">読み込み中...</div>
 
@@ -71,7 +91,6 @@ export default function AdminPage() {
         </div>
 
         <div className="flex gap-6 items-start">
-          {/* 左側：教員リスト */}
           <div className="w-1/3 bg-white p-4 rounded-lg shadow">
             <h2 className="font-bold text-slate-600 mb-4 border-b pb-2">教員を選択</h2>
             <div className="space-y-2">
@@ -95,7 +114,6 @@ export default function AdminPage() {
             </div>
           </div>
 
-          {/* 右側：詳細テーブル */}
           <div className="w-2/3 bg-white p-6 rounded-lg shadow">
             {!selectedUser ? (
               <div className="text-center text-slate-400 py-20">
@@ -113,6 +131,17 @@ export default function AdminPage() {
                     <p className="font-bold text-3xl text-blue-600">¥{totalAmount.toLocaleString()}</p>
                   </div>
                 </div>
+
+                {/* Excelダウンロードボタン（ここに追加！） */}
+                <button 
+                  onClick={handleDownloadExcel}
+                  className="w-full mb-6 bg-green-600 hover:bg-green-700 text-white font-bold py-3 rounded-lg shadow flex justify-center items-center gap-2 transition"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                  </svg>
+                  Excelファイルをダウンロード
+                </button>
 
                 <div className="overflow-x-auto border rounded-lg">
                   <table className="w-full text-sm text-left text-slate-600">
@@ -133,9 +162,6 @@ export default function AdminPage() {
                       ))}
                     </tbody>
                   </table>
-                  {filteredData.length === 0 && (
-                    <p className="text-center p-6 text-slate-400">データがありません</p>
-                  )}
                 </div>
               </>
             )}

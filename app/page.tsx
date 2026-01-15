@@ -6,7 +6,10 @@ import { useRouter } from 'next/navigation'
 import Calendar from 'react-calendar'
 import 'react-calendar/dist/Calendar.css'
 
-// 型定義に user_email を追加
+// ★管理者リスト（ここに事務担当者のメアドを入れます）
+// 複数いる場合はカンマで区切ってください: ['user1@example.com', 'user2@example.com']
+const ADMIN_EMAILS = ['mitamuraka@haguroko.ed.jp', 'tomonoem@haguroko.ed.jp '] 
+
 type Allowance = {
   id: number
   user_id: string
@@ -32,7 +35,7 @@ export default function Home() {
   const [selectedDate, setSelectedDate] = useState<Date>(new Date())
   const [activityType, setActivityType] = useState('部活動指導')
   const [amount, setAmount] = useState('3600')
-  const [userEmail, setUserEmail] = useState('') // 自分のメアド保持用
+  const [userEmail, setUserEmail] = useState('')
 
   useEffect(() => {
     const getData = async () => {
@@ -69,10 +72,9 @@ export default function Home() {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
 
-    // メールアドレスも一緒に保存する
     const { error } = await supabase.from('allowances').insert({
       user_id: user.id,
-      user_email: user.email, // ここで保存！
+      user_email: user.email,
       date: dateStr,
       activity_type: activityType,
       amount: Number(amount),
@@ -92,7 +94,6 @@ export default function Home() {
     else fetchAllowances()
   }
 
-  // 合計金額の計算
   const calculateMonthTotal = () => {
     const targetMonth = selectedDate.getMonth()
     const targetYear = selectedDate.getFullYear()
@@ -116,12 +117,18 @@ export default function Home() {
 
   if (loading) return <div className="min-h-screen flex items-center justify-center text-slate-400">読み込み中...</div>
 
+  // 管理者かどうか判定
+  const isAdmin = ADMIN_EMAILS.includes(userEmail)
+
   return (
     <div className="min-h-screen bg-gray-50 pb-20">
-      {/* 事務室用ページへのリンク（簡易設置） */}
-      <div className="bg-slate-800 text-white text-center py-2 text-xs">
-        <a href="/admin" className="underline hover:text-blue-200">事務担当者ページはこちら</a>
-      </div>
+      
+      {/* ★管理者のみ表示されるリンク */}
+      {isAdmin && (
+        <div className="bg-slate-800 text-white text-center py-2 text-xs transition hover:bg-slate-700">
+          <a href="/admin" className="block w-full h-full underline">事務担当者ページはこちら</a>
+        </div>
+      )}
 
       <div className="bg-white px-6 pt-6 pb-6 rounded-b-3xl shadow-sm mb-6 sticky top-0 z-10">
         <div className="flex justify-between items-start mb-4">
