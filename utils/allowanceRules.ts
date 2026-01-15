@@ -21,6 +21,16 @@ export const ACTIVITY_TYPES = [
     { id: 'outside', label: '県外' },
   ] as const;
   
+  // ★運転による「上乗せ」金額の設定
+  // 業務内容の金額に、この金額がプラスされます。
+  const DRIVING_ADDONS: Record<string, number> = {
+    school: 0,           // 選択なし
+    local: 0,            // 通学圏内（基本額に含まれる場合など。必要なら金額を入れてください）
+    prefecture: 0,       // 県内近距離
+    prefecture_far: 4100, // 県内遠距離 (例: 7500 - 3400 = 4100)
+    outside: 11600,       // 県外 (例: 15000 - 3400 = 11600)
+  };
+  
   // 計算ロジック
   export const calculateAmount = (
     activityId: string,
@@ -28,31 +38,28 @@ export const ACTIVITY_TYPES = [
     destinationId: string,
     isWorkDay: boolean
   ): number => {
+    // 1. 業務内容の基本額を取得
     const activity = ACTIVITY_TYPES.find(a => a.id === activityId);
     if (!activity) return 0;
   
-    // 基本額からスタート
-    let amount = activity.baseAmount;
+    let total = activity.baseAmount;
   
-    // 運転がある場合の計算（PDFの規定に基づく）
+    // 2. 運転がある場合、目的地に応じた金額を「上乗せ」する
     if (isDriving) {
-      if (destinationId === 'outside') {
-        // 県外運転: 基本15,000円 (勤務日は12,600円)
-        return isWorkDay ? 12600 : 15000;
-      } 
-      else if (destinationId === 'prefecture_far') {
-        // 県内遠距離: 7,500円 (勤務日は5,100円の規定があれば調整)
-        return isWorkDay ? 5100 : 7500; 
-      } 
-      else {
-        // 近距離運転
-        if (activityId === 'B') return 1700; // 半日はそのまま
-        return Math.max(amount, 3400); // 最低3,400円保証
+      const addon = DRIVING_ADDONS[destinationId] || 0;
+      
+      // ※勤務日の場合の減額ルールなどがあればここで調整
+      // 例: 勤務日の県外運転は上乗せ額が変わる場合など
+      if (isWorkDay && destinationId === 'outside') {
+         // total += 9200; // もし勤務日なら別の加算額を使う場合
+         total += addon; // とりあえずそのまま加算
+      } else {
+         total += addon;
       }
     }
   
-    // 運転なし・勤務日の場合の減額規定などがあればここに追記
-    // 例: 勤務日の遠征は支給なし、など
+    // 3. その他、宿泊などの加算があればここに追加可能
+    // if (isAccommodation) total += 0; 
   
-    return amount;
+    return total;
   };
