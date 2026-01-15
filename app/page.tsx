@@ -74,7 +74,7 @@ export default function Home() {
       const type = data?.day_type || (selectedDate.getDay() % 6 === 0 ? '休日(仮)' : '勤務日(仮)')
       setDayType(type)
       
-      // 日付が変わったら、不適切な選択肢をリセットする
+      // 日付が変わったら選択をリセット
       setActivityId('') 
     }
     updateDayInfo()
@@ -100,7 +100,7 @@ export default function Home() {
     setAllowances(data || [])
   }
 
-  // ★ログアウト処理（追加）
+  // ログアウト処理
   const handleLogout = async () => {
     await supabase.auth.signOut()
     router.push('/login')
@@ -139,19 +139,6 @@ export default function Home() {
     if (!error) fetchAllowances()
   }
 
-  // ★重要: 勤務形態に応じて選択肢をフィルタリング
-  const getFilteredActivities = () => {
-    const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
-    
-    return ACTIVITY_TYPES.filter(type => {
-      // 勤務日の場合、休日用の業務（A, B）は除外
-      if (isWorkDay) {
-        if (type.id === 'A' || type.id === 'B') return false
-      }
-      return true
-    })
-  }
-
   // 表示月の変更操作
   const handlePrevMonth = () => {
     const newDate = new Date(selectedDate)
@@ -185,6 +172,7 @@ export default function Home() {
   }
 
   const isAdmin = ADMIN_EMAILS.includes(userEmail)
+  const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
 
   return (
     <div className="min-h-screen bg-slate-50 pb-20">
@@ -194,10 +182,8 @@ export default function Home() {
         </div>
       )}
 
-      {/* スタイリッシュなヘッダー（月切り替え付き） */}
+      {/* ヘッダーエリア */}
       <div className="bg-white px-6 py-4 rounded-b-3xl shadow-sm mb-6 sticky top-0 z-10 relative">
-        
-        {/* ★ログアウトボタン（右上に追加） */}
         <button 
           onClick={handleLogout} 
           className="absolute right-4 top-4 text-xs font-bold text-slate-400 bg-slate-100 px-3 py-2 rounded-full hover:bg-slate-200"
@@ -206,18 +192,12 @@ export default function Home() {
         </button>
 
         <div className="flex flex-col items-center mt-2">
-          
-          {/* 月切り替えコントロール */}
           <div className="flex items-center gap-4 mb-2">
-            <button onClick={handlePrevMonth} className="text-slate-400 hover:text-blue-600 p-2 text-xl font-bold">
-              ‹
-            </button>
+            <button onClick={handlePrevMonth} className="text-slate-400 hover:text-blue-600 p-2 text-xl font-bold">‹</button>
             <h2 className="text-sm text-slate-500 font-bold">
               {selectedDate.getFullYear()}年 {selectedDate.getMonth() + 1}月
             </h2>
-            <button onClick={handleNextMonth} className="text-slate-400 hover:text-blue-600 p-2 text-xl font-bold">
-              ›
-            </button>
+            <button onClick={handleNextMonth} className="text-slate-400 hover:text-blue-600 p-2 text-xl font-bold">›</button>
           </div>
 
           <h1 className="text-4xl font-extrabold text-slate-800 tracking-tight">
@@ -231,12 +211,10 @@ export default function Home() {
         
         {/* カレンダー */}
         <div className="bg-white p-4 rounded-3xl shadow-sm">
-          {/* カレンダー自体のナビゲーションは隠して、上のヘッダーで操作するスタイルでも良いが、
-              機能維持のため標準表示のままにします。activeStartDateを制御すれば連動可能です */}
           <Calendar
             onChange={(val) => setSelectedDate(val as Date)}
             value={selectedDate}
-            activeStartDate={selectedDate} // これでヘッダー操作とカレンダー表示が連動します
+            activeStartDate={selectedDate}
             onActiveStartDateChange={({ activeStartDate }) => activeStartDate && setSelectedDate(activeStartDate)}
             locale="ja-JP"
             tileContent={getTileContent}
@@ -257,7 +235,7 @@ export default function Home() {
 
           <form onSubmit={handleAdd} className="flex flex-col gap-4">
             
-            {/* ① 業務内容（フィルタリング適用） */}
+            {/* 業務内容 */}
             <div>
               <label className="block text-xs font-bold text-slate-500 mb-1">業務内容</label>
               <select 
@@ -266,20 +244,23 @@ export default function Home() {
                 className="w-full bg-slate-100 p-3 rounded-lg outline-none font-bold text-slate-700 text-sm"
               >
                 <option value="">選択してください</option>
-                {getFilteredActivities().map(type => (
+                {/* 制限を撤廃してすべて表示 */}
+                {ACTIVITY_TYPES.map(type => (
                   <option key={type.id} value={type.id}>{type.label}</option>
                 ))}
               </select>
-              {/* 入力制限のメッセージ */}
-              {dayType.includes('勤務日') && (
-                <p className="text-[10px] text-orange-400 mt-1 text-right">※勤務日のため一部の項目は選択できません</p>
+              {/* 注意書きのみ表示 */}
+              {isWorkDay && (activityId === 'A' || activityId === 'B') && (
+                <p className="text-[10px] text-orange-400 mt-1 text-right">
+                  ⚠️ カレンダー上は勤務日ですが、休日手当を選択中です
+                </p>
               )}
             </div>
 
-            {/* ② 目的地 */}
+            {/* 目的地 */}
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="block text-xs font-bold text-slate-500 mb-1">区分</label>
+                <label className="block text-xs font-bold text-slate-500 mb-1">区分（運転加算）</label>
                 <select 
                   value={destinationId} 
                   onChange={(e) => setDestinationId(e.target.value)}
@@ -302,7 +283,7 @@ export default function Home() {
               </div>
             </div>
 
-            {/* ③④ 運転・宿泊 */}
+            {/* 運転・宿泊 */}
             <div className="flex gap-3">
               <label className={`flex-1 p-3 rounded-lg cursor-pointer border transition text-center text-xs font-bold ${isDriving ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-400'}`}>
                 <input type="checkbox" checked={isDriving} onChange={e => setIsDriving(e.target.checked)} className="hidden" />
@@ -314,7 +295,7 @@ export default function Home() {
               </label>
             </div>
 
-            {/* ⑤ 金額表示 */}
+            {/* 金額 */}
             <div className="bg-slate-800 text-white p-4 rounded-xl flex justify-between items-center">
               <span className="text-xs font-medium">支給予定額</span>
               <span className="text-xl font-bold">¥{calculatedAmount.toLocaleString()}</span>
@@ -326,41 +307,32 @@ export default function Home() {
           </form>
         </div>
         
-        {/* 履歴リスト（選択月のデータのみ表示） */}
+        {/* 履歴 */}
         <div className="space-y-2 pb-10">
             <h3 className="font-bold text-slate-400 text-xs px-2">{selectedDate.getMonth() + 1}月の履歴</h3>
             {allowances.filter(item => {
                 const d = new Date(item.date);
                 return d.getMonth() === selectedDate.getMonth() && d.getFullYear() === selectedDate.getFullYear();
-            }).length === 0 ? (
-                <p className="text-center text-slate-300 text-sm py-4">履歴はありません</p>
-            ) : (
-                allowances
-                .filter(item => {
-                    const d = new Date(item.date);
-                    return d.getMonth() === selectedDate.getMonth() && d.getFullYear() === selectedDate.getFullYear();
-                })
-                .map((item) => (
-                <div key={item.id} className="bg-white p-3 rounded-xl shadow-sm flex justify-between items-center border border-slate-100">
-                    <div className="flex items-center gap-3">
-                    <div className="text-center min-w-[40px]">
-                        <span className="block text-xs text-slate-400">{item.date.split('-')[1]}/</span>
-                        <span className="block font-bold text-slate-700">{item.date.split('-')[2]}</span>
-                    </div>
-                    <div>
-                        <p className="text-xs font-bold text-slate-700 line-clamp-1">{item.activity_type}</p>
-                        <p className="text-[10px] text-slate-400">
-                        {item.destination_type} {item.is_driving ? '🚗' : ''} {item.is_accommodation ? '🏨' : ''}
-                        </p>
-                    </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                    <span className="font-bold text-slate-700 text-sm">¥{item.amount.toLocaleString()}</span>
-                    <button onClick={() => handleDelete(item.id)} className="text-slate-300 hover:text-red-500 p-2">🗑</button>
-                    </div>
+            }).map((item) => (
+            <div key={item.id} className="bg-white p-3 rounded-xl shadow-sm flex justify-between items-center border border-slate-100">
+                <div className="flex items-center gap-3">
+                <div className="text-center min-w-[40px]">
+                    <span className="block text-xs text-slate-400">{item.date.split('-')[1]}/</span>
+                    <span className="block font-bold text-slate-700">{item.date.split('-')[2]}</span>
                 </div>
-                ))
-            )}
+                <div>
+                    <p className="text-xs font-bold text-slate-700 line-clamp-1">{item.activity_type}</p>
+                    <p className="text-[10px] text-slate-400">
+                    {item.destination_type} {item.is_driving ? '🚗' : ''} {item.is_accommodation ? '🏨' : ''}
+                    </p>
+                </div>
+                </div>
+                <div className="flex items-center gap-2">
+                <span className="font-bold text-slate-700 text-sm">¥{item.amount.toLocaleString()}</span>
+                <button onClick={() => handleDelete(item.id)} className="text-slate-300 hover:text-red-500 p-2">🗑</button>
+                </div>
+            </div>
+            ))}
         </div>
       </div>
     </div>
