@@ -41,8 +41,10 @@ export default function AdminPage() {
   const [allowances, setAllowances] = useState<any[]>([])
   const [schedules, setSchedules] = useState<any[]>([])
   const [aggregatedData, setAggregatedData] = useState<any[]>([])
+  const [userList, setUserList] = useState<{id: string, email: string}[]>([]) // ユーザー一覧
+  const [selectedUserId, setSelectedUserId] = useState<string>('all') // 選択フィルター
   
-  const [viewMode, setViewMode] = useState<'allowance' | 'schedule'>('allowance') // デフォルトは手当集計
+  const [viewMode, setViewMode] = useState<'allowance' | 'schedule'>('allowance')
 
   useEffect(() => {
     const checkAdmin = async () => {
@@ -58,6 +60,11 @@ export default function AdminPage() {
     checkAdmin()
   }, [])
 
+  // フィルタリング処理（データまたは選択ユーザーが変わったら再集計）
+  useEffect(() => {
+    aggregateData()
+  }, [allowances, schedules, selectedUserId])
+
   const handleMonthChange = (offset: number) => {
     const newDate = new Date(selectedMonth)
     newDate.setMonth(newDate.getMonth() + offset)
@@ -65,56 +72,57 @@ export default function AdminPage() {
     fetchData(newDate)
   }
 
-  // データ取得（日付範囲を厳密に設定）
   const fetchData = async (date: Date) => {
     setLoading(true)
     const y = date.getFullYear()
     const m = date.getMonth() + 1
-    
-    // 月初と月末を文字列で厳密に指定 (YYYY-MM-DD)
     const startDate = `${y}-${String(m).padStart(2, '0')}-01`
-    // 月末日を計算
     const lastDay = new Date(y, m, 0).getDate()
     const endDate = `${y}-${String(m).padStart(2, '0')}-${lastDay}`
 
-    // 1. 全データを取得
+    // 全データ取得
     const { data: allowData } = await supabase.from('allowances').select('*').gte('date', startDate).lte('date', endDate).order('date')
-    const { data: schedData } = await supabase.from('daily_schedules').select('*').gte('date', startDate).lte('date', endDate)
+    const { data: schedData } = await supabase.from('daily_schedules').select('*').gte('date', startDate).lte('date', endDate).order('date')
     
     setAllowances(allowData || [])
     setSchedules(schedData || [])
 
-    // 2. ユーザーリストの統合
-    const userMap = new Map<string, string>() 
-    allowData?.forEach((a: any) => { if(a.user_email) userMap.set(a.user_id, a.user_email) })
-    schedData?.forEach((s: any) => { if(s.user_email && !userMap.has(s.user_id)) userMap.set(s.user_id, s.user_email) })
+    // ユーザーリスト更新
+    const uMap = new Map<string, string>()
+    allowData?.forEach((a: any) => { if(a.user_email) uMap.set(a.user_id, a.user_email) })
+    schedData?.forEach((s: any) => { if(s.user_email && !uMap.has(s.user_id)) uMap.set(s.user_id, s.user_email) })
+    setUserList(Array.from(uMap.entries()).map(([id, email]) => ({ id, email })))
 
-    // 3. 集計処理
-    const aggResult: any[] = []
+    setLoading(false)
+  }
+
+  // 集計ロジック
+  const aggregateData = () => {
+    // ユーザーリストをベースに集計（フィルタリング適用）
+    const targets = selectedUserId === 'all' ? userList : userList.filter(u => u.id === selectedUserId)
     
-    userMap.forEach((email, userId) => {
-        const myAllowances = allowData?.filter((a: any) => a.user_id === userId) || []
-        const mySchedules = schedData?.filter((s: any) => s.user_id === userId) || []
+    const result = targets.map(user => {
+        const myAllowances = allowances.filter(a => a.user_id === user.id)
+        const mySchedules = schedules.filter(s => s.user_id === user.id)
 
         const row: any = {
-            id: userId,
-            name: email,
-            total_amount: myAllowances.reduce((sum: number, a: any) => sum + a.amount, 0),
+            id: user.id,
+            name: user.email,
+            total_amount: myAllowances.reduce((sum, a) => sum + a.amount, 0),
             allowance_count: myAllowances.length,
-            allowance_details: myAllowances, // 詳細データ保持
+            allowance_details: myAllowances,
             patterns: {},
             annual_leave_start: 20,
             annual_leave_used: 0,
             annual_leave_remain: 20,
-            time_totals: {}
+            time_totals: {},
+            schedule_details: mySchedules // 詳細用
         }
 
         TIME_ITEMS.forEach(t => row.time_totals[t.key] = 0)
 
-        mySchedules.forEach((s: any) => {
-            if (s.work_pattern_code) {
-                row.patterns[s.work_pattern_code] = (row.patterns[s.work_pattern_code] || 0) + 1
-            }
+        mySchedules.forEach(s => {
+            if (s.work_pattern_code) row.patterns[s.work_pattern_code] = (row.patterns[s.work_pattern_code] || 0) + 1
             if (s.leave_annual === '1日') row.annual_leave_used += 1.0
             if (s.leave_annual === '半日') row.annual_leave_used += 0.5
             
@@ -122,68 +130,102 @@ export default function AdminPage() {
                 if (s[t.key]) row.time_totals[t.key] = addTime(row.time_totals[t.key], s[t.key])
             })
         })
-
         row.annual_leave_remain = row.annual_leave_start - row.annual_leave_used
-        aggResult.push(row)
+        return row
     })
-
-    setAggregatedData(aggResult)
-    setLoading(false)
+    setAggregatedData(result)
   }
 
   // 削除機能
   const handleDeleteAllowance = async (id: number) => {
-    if (!confirm('この手当データを削除しますか？')) return
-    const { error } = await supabase.from('allowances').delete().eq('id', id)
-    if (error) alert('削除エラー: ' + error.message)
-    else fetchData(selectedMonth) // 再読み込み
+    if (!confirm('削除しますか？')) return
+    await supabase.from('allowances').delete().eq('id', id)
+    fetchData(selectedMonth)
   }
 
-  const addTime = (currentMinutes: number, timeStr: string | null) => {
-    if (!timeStr || !timeStr.includes(':')) return currentMinutes
+  const addTime = (curr: number, timeStr: string | null) => {
+    if (!timeStr || !timeStr.includes(':')) return curr
     const [h, m] = timeStr.split(':').map(Number)
-    return currentMinutes + (h * 60) + m
+    return curr + (h * 60) + m
   }
-  
-  const formatMinutes = (minutes: number) => {
-    if (minutes === 0) return ''
-    const h = Math.floor(minutes / 60)
-    const m = minutes % 60
+  const formatMinutes = (mins: number) => {
+    if (mins === 0) return ''
+    const h = Math.floor(mins / 60)
+    const m = mins % 60
     return `${h}:${String(m).padStart(2, '0')}`
   }
 
+  // --- Excel出力 (詳細版) ---
   const downloadExcel = () => {
     const wb = XLSX.utils.book_new()
     const y = selectedMonth.getFullYear()
     const m = selectedMonth.getMonth() + 1
 
-    // 手当シート
-    const allowanceData = aggregatedData.map(row => ({
-        "氏名": row.name,
-        "支給合計額": row.total_amount,
-        "回数": row.allowance_count,
-        "内訳": row.allowance_details.map((d: any) => `${d.date.slice(8)}日:${d.activity_type}`).join(' / ')
-    }))
-    const ws1 = XLSX.utils.json_to_sheet(allowanceData)
-    XLSX.utils.book_append_sheet(wb, ws1, "手当集計")
-
-    // 勤務表シート
-    const scheduleData = aggregatedData.map(row => {
+    // 1. サマリーシート (全員または選択した人の合計)
+    const summaryData = aggregatedData.map(row => {
         const timeData: any = {}
         TIME_ITEMS.forEach(t => timeData[t.label] = formatMinutes(row.time_totals[t.key]) || '-')
         return {
             "氏名": row.name,
-            "年休(付与)": row.annual_leave_start,
-            "年休(使用)": row.annual_leave_used,
+            "手当合計": row.total_amount,
+            "手当回数": row.allowance_count,
             "年休(残)": row.annual_leave_remain,
-            "勤務パターン": Object.entries(row.patterns).map(([k, v]) => `${k}:${v}回`).join(' '),
+            "勤務内訳": Object.entries(row.patterns).map(([k, v]) => `${k}:${v}`).join(' '),
             ...timeData
         }
     })
-    const ws2 = XLSX.utils.json_to_sheet(scheduleData)
-    XLSX.utils.book_append_sheet(wb, ws2, "勤務・休暇集計")
+    const wsSummary = XLSX.utils.json_to_sheet(summaryData)
+    XLSX.utils.book_append_sheet(wb, wsSummary, "サマリー")
 
-    XLSX.writeFile(wb, `勤務手当集計_${y}年${m}月.xlsx`)
+    // 2. 詳細シート (Aさんのデータ... Bさんのデータ... と続く)
+    const detailRows: any[] = []
+    
+    aggregatedData.forEach(user => {
+        // ヘッダー的な行
+        detailRows.push({ "日付": `【${user.name}】` }) 
+        
+        // 日付順にマージして出力するためのマップ
+        const dateMap = new Map<string, any>()
+        
+        // 勤務データの展開
+        user.schedule_details.forEach((s: any) => {
+            if(!dateMap.has(s.date)) dateMap.set(s.date, { date: s.date, type: '勤務', info: s.work_pattern_code || '', amount: 0 })
+            else {
+                const d = dateMap.get(s.date)
+                d.info += ` ${s.work_pattern_code || ''}`
+            }
+        })
+        
+        // 手当データの展開
+        user.allowance_details.forEach((a: any) => {
+            if(!dateMap.has(a.date)) dateMap.set(a.date, { date: a.date, type: '手当', info: a.activity_type, amount: a.amount })
+            else {
+                const d = dateMap.get(a.date)
+                d.info += ` / ${a.activity_type}`
+                d.amount += a.amount
+            }
+        })
+
+        // 日付でソートして行に追加
+        const sortedDates = Array.from(dateMap.keys()).sort()
+        sortedDates.forEach(date => {
+            const d = dateMap.get(date)
+            detailRows.push({
+                "氏名": user.name,
+                "日付": d.date,
+                "勤務/内容": d.info,
+                "金額": d.amount > 0 ? d.amount : ''
+            })
+        })
+        detailRows.push({}) // 空行を入れる
+    })
+
+    const wsDetails = XLSX.utils.json_to_sheet(detailRows)
+    // 列幅調整
+    wsDetails['!cols'] = [{ wch: 30 }, { wch: 15 }, { wch: 40 }, { wch: 10 }]
+    
+    XLSX.utils.book_append_sheet(wb, wsDetails, "詳細データ")
+    XLSX.writeFile(wb, `勤務手当詳細_${y}年${m}月.xlsx`)
   }
 
   if (!isAdmin) return <div className="p-10 text-center">確認中...</div>
@@ -204,6 +246,19 @@ export default function AdminPage() {
             <button onClick={() => handleMonthChange(-1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold text-slate-500">‹</button>
             <span className="text-2xl font-extrabold text-slate-800 w-40 text-center">{selectedMonth.getFullYear()}年 {selectedMonth.getMonth() + 1}月</span>
             <button onClick={() => handleMonthChange(1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold text-slate-500">›</button>
+          </div>
+
+          {/* ユーザー選択 */}
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-bold text-slate-600">表示対象:</span>
+            <select 
+                className="p-2 border border-slate-300 rounded font-bold text-sm"
+                value={selectedUserId}
+                onChange={(e) => setSelectedUserId(e.target.value)}
+            >
+                <option value="all">全員を表示</option>
+                {userList.map(u => <option key={u.id} value={u.id}>{u.email}</option>)}
+            </select>
           </div>
 
           <div className="flex gap-4 items-center">
@@ -230,10 +285,11 @@ export default function AdminPage() {
                         <tr>
                         <th className="p-4 font-bold w-1/4">氏名</th>
                         <th className="p-4 font-bold text-right w-1/6">支給合計額</th>
-                        <th className="p-4 font-bold">内訳（削除ボタン付き）</th>
+                        <th className="p-4 font-bold">内訳（削除可能）</th>
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200">
+                        {aggregatedData.length === 0 && <tr><td colSpan={3} className="p-10 text-center text-slate-400">データがありません</td></tr>}
                         {aggregatedData.map((user, i) => (
                         <tr key={i} className="hover:bg-slate-50">
                             <td className="p-4 font-bold align-top">{user.name}</td>
@@ -248,14 +304,9 @@ export default function AdminPage() {
                                         <span className="font-bold text-slate-700">{d.date.slice(8)}日</span>
                                         <span className="text-slate-600 text-xs">{d.activity_type}</span>
                                         <span className="font-bold text-blue-600">¥{d.amount.toLocaleString()}</span>
-                                        <button 
-                                            onClick={() => handleDeleteAllowance(d.id)} 
-                                            className="text-slate-300 hover:text-red-500 text-lg leading-none"
-                                            title="削除"
-                                        >×</button>
+                                        <button onClick={() => handleDeleteAllowance(d.id)} className="text-slate-300 hover:text-red-500 text-lg leading-none" title="削除">×</button>
                                     </div>
                                     ))}
-                                    {user.allowance_details.length === 0 && <span className="text-slate-400 text-xs">なし</span>}
                                 </div>
                             </td>
                         </tr>
@@ -288,6 +339,7 @@ export default function AdminPage() {
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200">
+                        {aggregatedData.length === 0 && <tr><td colSpan={20} className="p-10 text-center text-slate-400">データがありません</td></tr>}
                         {aggregatedData.map((user, i) => (
                         <tr key={i} className="hover:bg-yellow-50 transition-colors text-slate-900">
                             <td className="p-4 font-bold sticky left-0 bg-white border-r border-slate-200 z-10">{user.name}</td>
