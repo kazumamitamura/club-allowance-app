@@ -11,9 +11,6 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState<{ text: string, type: 'error' | 'success' } | null>(null)
   
-  // ★メール送信完了状態かどうか
-  const [isEmailSent, setIsEmailSent] = useState(false)
-  
   const router = useRouter()
   const supabase = createClient()
 
@@ -24,73 +21,34 @@ export default function LoginPage() {
 
     try {
       if (isSignUp) {
-        // 新規登録
+        // ■ 新規登録処理
+        // Supabaseの「Confirm email」がOFFなら、signUp直後にログイン状態になります
         const { error } = await supabase.auth.signUp({
           email,
           password,
-          options: {
-            emailRedirectTo: `${location.origin}/auth/callback`,
-          },
         })
         if (error) throw error
         
-        // ★成功したら画面を切り替える
-        setIsEmailSent(true)
-        setMessage({ text: '確認メールを送信しました！', type: 'success' })
+        // 即座にホーム画面へ
+        router.push('/')
+        router.refresh() // 念のため状態を更新
+
       } else {
-        // ログイン
+        // ■ ログイン処理
         const { error } = await supabase.auth.signInWithPassword({
           email,
           password,
         })
         if (error) throw error
+
+        // ホーム画面へ
         router.push('/')
+        router.refresh()
       }
     } catch (error: any) {
       setMessage({ text: error.message, type: 'error' })
       setLoading(false)
     }
-  }
-
-  // ★送信完了画面（Gmailボタン付き）
-  if (isEmailSent) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-100 p-4">
-        <div className="bg-white p-8 rounded-xl shadow-md w-full max-w-sm text-center">
-          <div className="text-4xl mb-4">📩</div>
-          <h2 className="text-xl font-bold text-slate-800 mb-2">確認メールを送信しました</h2>
-          <p className="text-sm text-slate-600 mb-6">
-            <strong>{email}</strong> 宛にメールを送りました。<br/>
-            メール内のリンクをタップして登録を完了してください。
-          </p>
-
-          {/* Gmailを開くボタン */}
-          <a 
-            href="https://mail.google.com/" 
-            target="_blank" 
-            rel="noopener noreferrer"
-            className="block w-full bg-red-500 text-white font-bold py-3 rounded-lg hover:bg-red-600 transition mb-3 shadow"
-          >
-            📬 Gmailを開く
-          </a>
-          
-          {/* その他のメーラー用 */}
-          <a 
-            href="mailto:" 
-            className="block w-full bg-slate-100 text-slate-600 font-bold py-3 rounded-lg hover:bg-slate-200 transition text-sm"
-          >
-            その他のメールアプリを開く
-          </a>
-
-          <button 
-            onClick={() => setIsEmailSent(false)}
-            className="mt-6 text-xs text-slate-400 underline"
-          >
-            戻る
-          </button>
-        </div>
-      </div>
-    )
   }
 
   return (
@@ -134,7 +92,7 @@ export default function LoginPage() {
             disabled={loading}
             className="w-full bg-blue-600 text-white font-bold py-3 rounded-lg hover:bg-blue-700 transition disabled:opacity-50 mt-2"
           >
-            {loading ? '処理中...' : (isSignUp ? '登録メールを送信' : 'ログイン')}
+            {loading ? '処理中...' : (isSignUp ? 'アカウント作成して開始' : 'ログイン')}
           </button>
         </form>
 
