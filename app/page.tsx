@@ -9,15 +9,7 @@ import { ACTIVITY_TYPES, DESTINATIONS, calculateAmount } from '@/utils/allowance
 
 const ADMIN_EMAILS = ['mitamuraka@haguroko.ed.jp', 'tomonoem@haguroko.ed.jp'].map(e => e.toLowerCase())
 
-const OVERTIME_ITEMS = [
-  { key: 'overtime_weekday', label: '平日' },
-  { key: 'overtime_weekday2', label: '平日2' },
-  { key: 'overtime_late_night', label: '深夜' },
-  { key: 'overtime_holiday', label: '休日' },
-  { key: 'overtime_holiday_late', label: '休日深夜' },
-  { key: 'lateness', label: '遅刻' },
-  { key: 'early_leave', label: '早退' },
-]
+// ★修正: 超過勤務系の定数を削除しました
 
 const LEAVE_ITEMS_TIME = [
   { key: 'leave_hourly', label: '時間年休' },
@@ -49,8 +41,8 @@ export default function Home() {
   const supabase = createClient()
   
   const [userEmail, setUserEmail] = useState('')
-  const [userId, setUserId] = useState('') // 自分のID
-  const [isAdmin, setIsAdmin] = useState(false) // 管理者判定
+  const [userId, setUserId] = useState('')
+  const [isAdmin, setIsAdmin] = useState(false)
 
   const [allowances, setAllowances] = useState<Allowance[]>([])
   const [schedules, setSchedules] = useState<DailySchedule[]>([])
@@ -63,7 +55,9 @@ export default function Home() {
   const [isRegistered, setIsRegistered] = useState(false)
   const [selectedPattern, setSelectedPattern] = useState('C')
   const [details, setDetails] = useState<any>({})
-  const [openCategory, setOpenCategory] = useState<'overtime' | 'leave' | null>(null)
+  
+  // ★修正: overtime の開閉状態管理を削除し、leaveのみに
+  const [openCategory, setOpenCategory] = useState<'leave' | null>(null)
 
   const [activityId, setActivityId] = useState('')
   const [destinationId, setDestinationId] = useState('school')
@@ -72,11 +66,9 @@ export default function Home() {
   const [isAccommodation, setIsAccommodation] = useState(false)
   const [calculatedAmount, setCalculatedAmount] = useState(0)
 
-  // 編集ロック判定 (翌月5日まで)
   const isLocked = (targetDate: Date) => {
-    if (isAdmin) return false // 管理者はロック無視
+    if (isAdmin) return false 
     const now = new Date()
-    // 締め切り：対象月の翌月6日の0時0分（＝5日の終了）
     const deadline = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 6, 0, 0, 0)
     return now >= deadline
   }
@@ -89,12 +81,10 @@ export default function Home() {
       setUserEmail(user.email || '')
       setUserId(user.id)
       
-      // 管理者判定
       if (ADMIN_EMAILS.includes(user.email?.toLowerCase() || '')) {
         setIsAdmin(true)
       }
 
-      // データ取得（自分のデータのみ）
       fetchData(user.id)
       fetchSchoolCalendar()
       fetchMasterSchedules()
@@ -105,7 +95,6 @@ export default function Home() {
     init()
   }, [])
 
-  // 自分のデータだけを取得する関数
   const fetchData = async (uid: string) => {
     const { data: allowData } = await supabase.from('allowances').select('*').eq('user_id', uid).order('date', { ascending: false })
     setAllowances(allowData || [])
@@ -134,14 +123,13 @@ export default function Home() {
       const masterSchedule = masterSchedules.find(m => m.date === dateStr)
       const defaultPattern = masterSchedule?.work_pattern_code || (type.includes('休日') || type.includes('週休') ? '' : 'C')
 
-      // ローカルのstateから検索（毎回fetchしない）
       const scheduleData = schedules.find(s => s.date === dateStr)
       
       if (scheduleData) {
         setIsRegistered(true)
         setSelectedPattern(scheduleData.work_pattern_code || defaultPattern)
         const newDetails: any = {}
-        OVERTIME_ITEMS.forEach(i => { if (scheduleData[i.key]) newDetails[i.key] = scheduleData[i.key] })
+        // ★修正: 超過勤務の読み込み処理を削除
         if (scheduleData.leave_annual) newDetails['leave_annual'] = scheduleData.leave_annual
         LEAVE_ITEMS_TIME.forEach(i => { if (scheduleData[i.key]) newDetails[i.key] = scheduleData[i.key] })
         setDetails(newDetails)
@@ -167,7 +155,7 @@ export default function Home() {
       }
     }
     updateDayInfo()
-  }, [selectedDate, allowances, schedules, schoolCalendar, masterSchedules]) // schedules依存を追加
+  }, [selectedDate, allowances, schedules, schoolCalendar, masterSchedules])
 
   useEffect(() => {
     const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
@@ -183,7 +171,6 @@ export default function Home() {
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
     
-    // ★ロックチェック
     if (isLocked(selectedDate)) {
         alert('締め日（翌月5日）を過ぎているため、編集できません。\n修正が必要な場合は管理者へ連絡してください。')
         return
@@ -200,7 +187,8 @@ export default function Home() {
         work_pattern_code: selectedPattern, 
         leave_annual: details['leave_annual'] || null 
     };
-    [...OVERTIME_ITEMS, ...LEAVE_ITEMS_TIME].forEach(item => { scheduleData[item.key] = details[item.key] || null })
+    // ★修正: 超過勤務の保存処理を削除（休暇のみ保存）
+    LEAVE_ITEMS_TIME.forEach(item => { scheduleData[item.key] = details[item.key] || null })
 
     const { error: sErr } = await supabase.from('daily_schedules').upsert(scheduleData, { onConflict: 'user_id, date' })
     if (sErr) { alert('エラー: ' + sErr.message); return }
@@ -212,19 +200,17 @@ export default function Home() {
       await supabase.from('allowances').delete().eq('user_id', user.id).eq('date', dateStr)
     }
     
-    // データ再取得
     fetchData(user.id)
     setIsRegistered(true); setOpenCategory(null); alert('保存しました')
   }
 
   const handleBulkRegister = async () => {
-    // ★ロックチェック（当月の1日がロックされていたら一括登録不可）
     if (isLocked(new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1))) {
         alert('締め日（翌月5日）を過ぎているため、一括登録はできません。')
         return
     }
 
-    if (!confirm(`${selectedDate.getMonth()+1}月の未入力日を、すべて「デフォルト勤務（C）」として一括登録しますか？`)) return
+    if (!confirm(`${selectedDate.getMonth()+1}月の未入力日を、すべて「デフォルト勤務」として一括登録しますか？`)) return
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
     const year = selectedDate.getFullYear(), month = selectedDate.getMonth(), lastDay = new Date(year, month + 1, 0).getDate()
@@ -246,7 +232,6 @@ export default function Home() {
     if (error) alert('エラー: ' + error.message); else { alert('完了しました！'); fetchData(user.id); router.refresh() }
   }
 
-  // ★削除機能（締め日チェック付き）
   const handleDelete = async (id: number, dateStr: string) => { 
     if (isLocked(new Date(dateStr))) {
         alert('締め日（翌月5日）を過ぎているため、削除できません。')
@@ -255,7 +240,7 @@ export default function Home() {
     if (!window.confirm('削除しますか？')) return; 
     
     const { error } = await supabase.from('allowances').delete().eq('id', id)
-    if (!error) fetchData(userId) // 自分のIDで再取得
+    if (!error) fetchData(userId)
   }
   
   const handleLogout = async () => { await supabase.auth.signOut(); router.push('/login') }
@@ -290,10 +275,9 @@ export default function Home() {
   }
   
   const currentPatternDetail = workPatterns.find(p => p.code === selectedPattern)
-  const hasOvertime = OVERTIME_ITEMS.some(i => details[i.key])
+  // ★修正: 超過勤務チェック削除
   const hasLeave = details['leave_annual'] || LEAVE_ITEMS_TIME.some(i => details[i.key])
   
-  // 現在表示中の日付がロックされているか
   const isCurrentDateLocked = isLocked(selectedDate)
 
   return (
@@ -331,7 +315,7 @@ export default function Home() {
           </div>
 
           <form onSubmit={handleSave} className={`flex flex-col gap-4 ${isCurrentDateLocked ? 'opacity-60 pointer-events-none' : ''}`}>
-            {/* ... (フォームの中身は変更なし) ... */}
+            
             <div className="bg-white p-3 rounded-xl border border-slate-200">
               <label className="block text-xs font-bold text-black mb-1">勤務パターン</label>
               <div className="flex items-center gap-2">
@@ -343,19 +327,7 @@ export default function Home() {
               </div>
             </div>
 
-            <div className={`bg-white rounded-xl border transition-all ${openCategory === 'overtime' ? 'border-orange-400 ring-2 ring-orange-100' : hasOvertime ? 'border-orange-300' : 'border-slate-200'}`}>
-              <button type="button" onClick={() => setOpenCategory(openCategory === 'overtime' ? null : 'overtime')} className="w-full flex justify-between items-center p-3 text-left">
-                <div className="flex items-center gap-2"><span className="text-lg">⏰</span><span className={`text-xs font-bold ${hasOvertime ? 'text-orange-600' : 'text-black'}`}>超過勤務・遅刻早退</span></div>
-                <span className="text-slate-400 text-xs">{openCategory === 'overtime' ? '▲ 閉じる' : hasOvertime ? '詳細あり ▼' : '追加する +'}</span>
-              </button>
-              {(openCategory === 'overtime' || hasOvertime) && (
-                <div className="p-3 pt-0 border-t border-slate-100 bg-orange-50/30 rounded-b-xl space-y-3">
-                   {openCategory === 'overtime' && (<div className="mb-2"><p className="text-[10px] text-slate-500 mb-1">項目を選択:</p><div className="flex flex-wrap gap-2">{OVERTIME_ITEMS.map(item => (<button key={item.key} type="button" onClick={() => updateDetail(item.key, details[item.key] ? '' : '00:00')} className={`text-xs px-2 py-1 rounded border font-bold ${details[item.key] ? 'bg-orange-500 text-white border-orange-600' : 'bg-white text-black border-slate-300'}`}>{item.label}</button>))}</div></div>)}
-                   {OVERTIME_ITEMS.filter(i => details[i.key] !== undefined).map(item => (<div key={item.key} className="flex items-center gap-2 animate-fadeIn"><label className="text-xs font-bold text-black w-20">{item.label}</label><input type="text" placeholder="1:00" value={details[item.key] || ''} onChange={(e) => updateDetail(item.key, e.target.value)} className="flex-1 p-2 rounded border border-slate-300 text-sm text-black font-bold" /><button type="button" onClick={() => updateDetail(item.key, '')} className="text-slate-400 hover:text-red-500">×</button></div>))}
-                </div>
-              )}
-            </div>
-
+            {/* ★修正: 超過勤務エリアを削除し、休暇のみ表示 */}
             <div className={`bg-white rounded-xl border transition-all ${openCategory === 'leave' ? 'border-green-400 ring-2 ring-green-100' : hasLeave ? 'border-green-300' : 'border-slate-200'}`}>
               <button type="button" onClick={() => setOpenCategory(openCategory === 'leave' ? null : 'leave')} className="w-full flex justify-between items-center p-3 text-left">
                  <div className="flex items-center gap-2"><span className="text-lg">🌴</span><span className={`text-xs font-bold ${hasLeave ? 'text-green-600' : 'text-black'}`}>休暇・欠勤</span></div>
@@ -400,12 +372,8 @@ export default function Home() {
             {allowances.filter(i => { const d = new Date(i.date); return d.getMonth() === selectedDate.getMonth() && d.getFullYear() === selectedDate.getFullYear() }).map((item) => (
             <div key={item.id} className="bg-white p-3 rounded-xl shadow-sm flex justify-between items-center border border-slate-100">
                 <div className="flex items-center gap-3"><span className="font-bold text-slate-700 text-sm">{item.date.split('-')[2]}日</span><span className="text-xs text-slate-500">{item.activity_type}</span></div>
-                <div className="flex items-center gap-2">
-                    <span className="font-bold text-slate-700 text-sm">¥{item.amount.toLocaleString()}</span>
-                    {/* ★削除ボタン: ロックされていなければ表示 */}
-                    {!isLocked(new Date(item.date)) && (
-                        <button onClick={() => handleDelete(item.id, item.date)} className="text-slate-300 hover:text-red-500">🗑</button>
-                    )}
+                <div className="flex items-center gap-2"><span className="font-bold text-slate-700 text-sm">¥{item.amount.toLocaleString()}</span>
+                    {!isLocked(new Date(item.date)) && <button onClick={() => handleDelete(item.id, item.date)} className="text-slate-300 hover:text-red-500">🗑</button>}
                 </div>
             </div>
             ))}
