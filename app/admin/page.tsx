@@ -147,99 +147,119 @@ export default function AdminPage() {
     return `${h}:${String(m).padStart(2, '0')}`
   }
 
-  const downloadExcel = () => {
+  // --- 手当用Excel出力 ---
+  const downloadAllowanceExcel = () => {
     const wb = XLSX.utils.book_new()
     const y = selectedMonth.getFullYear()
     const m = selectedMonth.getMonth() + 1
 
+    // サマリー
+    const summaryData = aggregatedData.map(row => {
+        return {
+            "氏名": row.name,
+            "支給合計額": row.total_amount,
+            "支給回数": row.allowance_count,
+        }
+    })
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryData), "手当一覧")
+
+    // 詳細
+    const detailRows: any[] = []
+    aggregatedData.forEach(user => {
+        if(user.allowance_details.length === 0) return
+        detailRows.push({ "日付": `【${user.name}】` }) 
+        
+        // 日付順ソート
+        const sortedDetails = [...user.allowance_details].sort((a,b) => a.date.localeCompare(b.date))
+        
+        sortedDetails.forEach((d: any) => {
+            detailRows.push({ 
+                "氏名": user.name, 
+                "日付": d.date, 
+                "手当内容": d.activity_type, 
+                "区分": d.destination_type || '-',
+                "金額": d.amount 
+            })
+        })
+        detailRows.push({})
+    })
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detailRows), "手当明細")
+    XLSX.writeFile(wb, `特殊勤務手当_${y}年${m}月.xlsx`)
+  }
+
+  // --- 勤務表用Excel出力 ---
+  const downloadScheduleExcel = () => {
+    const wb = XLSX.utils.book_new()
+    const y = selectedMonth.getFullYear()
+    const m = selectedMonth.getMonth() + 1
+
+    // サマリー
     const summaryData = aggregatedData.map(row => {
         const timeData: any = {}
         TIME_ITEMS.forEach(t => timeData[t.label] = formatMinutes(row.time_totals[t.key]) || '-')
         return {
             "氏名": row.name,
-            "手当合計": row.total_amount,
-            "手当回数": row.allowance_count,
+            "年休(付与)": row.annual_leave_start,
+            "年休(使用)": row.annual_leave_used,
             "年休(残)": row.annual_leave_remain,
             "勤務内訳": Object.entries(row.patterns).map(([k, v]) => `${k}:${v}`).join(' '),
             ...timeData
         }
     })
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryData), "サマリー")
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryData), "勤務集計")
 
+    // 詳細
     const detailRows: any[] = []
     aggregatedData.forEach(user => {
+        if(user.schedule_details.length === 0) return
         detailRows.push({ "日付": `【${user.name}】` }) 
-        const dateMap = new Map<string, any>()
-        user.schedule_details.forEach((s: any) => {
-            if(!dateMap.has(s.date)) dateMap.set(s.date, { date: s.date, type: '勤務', info: s.work_pattern_code || '', amount: 0 })
-            else { const d = dateMap.get(s.date); d.info += ` ${s.work_pattern_code || ''}` }
-        })
-        user.allowance_details.forEach((a: any) => {
-            if(!dateMap.has(a.date)) dateMap.set(a.date, { date: a.date, type: '手当', info: a.activity_type, amount: a.amount })
-            else { const d = dateMap.get(a.date); d.info += ` / ${a.activity_type}`; d.amount += a.amount }
-        })
-        const sortedDates = Array.from(dateMap.keys()).sort()
-        sortedDates.forEach(date => {
-            const d = dateMap.get(date)
-            detailRows.push({ "氏名": user.name, "日付": d.date, "勤務/内容": d.info, "金額": d.amount > 0 ? d.amount : '' })
+        
+        // 日付順ソート
+        const sortedSchedules = [...user.schedule_details].sort((a,b) => a.date.localeCompare(b.date))
+
+        sortedSchedules.forEach((s: any) => {
+            detailRows.push({ 
+                "氏名": user.name, 
+                "日付": s.date, 
+                "勤務形態": s.work_pattern_code || '', 
+                "年休": s.leave_annual || '',
+            })
         })
         detailRows.push({})
     })
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detailRows), "詳細データ")
-    XLSX.writeFile(wb, `勤務手当集計_${y}年${m}月.xlsx`)
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detailRows), "勤務明細")
+    XLSX.writeFile(wb, `勤務実績表_${y}年${m}月.xlsx`)
   }
 
-  // --- ★修正: 柔軟なCSV読み込み ---
+  // マスターCSV登録
   const handleMasterCsvUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
-
     if (!confirm('勤務形態マスター（A, B, C...）を登録しますか？\n※既存の日付のデータは上書きされます。')) return
 
     setUploading(true)
     const reader = new FileReader()
-    
     reader.onload = async (evt) => {
         const text = evt.target?.result as string
         const lines = text.split(/\r\n|\n/)
         const updates = []
-
         for (const line of lines) {
-            // カンマ区切りで分割
             const parts = line.split(',')
             if (parts.length < 2) continue
-
-            // データ整形 (全角数字対応、余計な空白削除)
             let dateStr = parts[0].trim().replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
             const code = parts[1].trim()
-
-            // 日付形式の統一 (2025/1/1 -> 2025-01-01)
             dateStr = dateStr.replace(/\//g, '-') 
-
-            // YYYY-MM-DD 形式かチェック (簡易)
             if (dateStr.match(/^\d{4}-\d{1,2}-\d{1,2}$/) && code) {
-                // 月や日が1桁の場合、0埋めする (2025-4-1 -> 2025-04-01)
                 const [y, m, d] = dateStr.split('-')
                 const formattedDate = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
-                
                 updates.push({ date: formattedDate, work_pattern_code: code })
             }
         }
-
-        if (updates.length === 0) {
-            alert('有効なデータが見つかりませんでした。\nCSVの日付形式を確認してください (例: 2025/04/01, A)')
-            setUploading(false)
-            return
-        }
-
+        if (updates.length === 0) { alert('有効なデータが見つかりませんでした'); setUploading(false); return }
         const { error } = await supabase.from('master_schedules').upsert(updates, { onConflict: 'date' })
-        
         setUploading(false)
         if (error) alert('登録エラー: ' + error.message)
-        else {
-            alert(`${updates.length}件のマスターデータを登録しました！`)
-            e.target.value = ''
-        }
+        else { alert(`${updates.length}件のマスターデータを登録しました！`); e.target.value = '' }
     }
     reader.readAsText(file)
   }
@@ -272,15 +292,25 @@ export default function AdminPage() {
             </select>
           </div>
 
-          <div className="flex gap-4 items-center">
+          <div className="flex gap-4 items-center flex-wrap justify-end">
              <div className="flex bg-slate-100 p-1 rounded-lg">
-               <button onClick={() => setViewMode('allowance')} className={`px-6 py-2 rounded-md text-sm font-bold transition-all ${viewMode === 'allowance' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>💰 手当</button>
-               <button onClick={() => setViewMode('schedule')} className={`px-6 py-2 rounded-md text-sm font-bold transition-all ${viewMode === 'schedule' ? 'bg-white text-green-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>⏰ 勤務表</button>
+               <button onClick={() => setViewMode('allowance')} className={`px-4 py-2 rounded-md text-sm font-bold transition-all ${viewMode === 'allowance' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>💰 表示:手当</button>
+               <button onClick={() => setViewMode('schedule')} className={`px-4 py-2 rounded-md text-sm font-bold transition-all ${viewMode === 'schedule' ? 'bg-white text-green-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>⏰ 表示:勤務</button>
              </div>
-             <button onClick={downloadExcel} className="bg-green-600 text-white px-6 py-2 rounded-lg text-sm font-bold hover:bg-green-700 shadow flex items-center gap-2">📥 Excel出力</button>
+             
+             {/* 出力ボタン群 */}
+             <div className="flex gap-2">
+                <button onClick={downloadAllowanceExcel} className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-blue-700 shadow flex items-center gap-1">
+                    📥 手当帳票
+                </button>
+                <button onClick={downloadScheduleExcel} className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-green-700 shadow flex items-center gap-1">
+                    📥 勤務管理表
+                </button>
+             </div>
           </div>
         </div>
 
+        {/* データ表示エリア（既存のまま） */}
         {loading ? (
           <div className="text-center py-20 text-slate-500 font-bold animate-pulse">データを集計中...</div>
         ) : (
@@ -355,22 +385,9 @@ export default function AdminPage() {
                     全教員に適用される「勤務形態（A, B...）」をCSVファイルで一括登録します。<br/>
                     <span className="text-red-500 font-bold">※ 管理者が一度行えば、全教員の「カレンダー」に即座に反映されます。</span>
                 </p>
-                
                 <div className="flex items-center gap-4">
-                    <input 
-                        type="file" 
-                        accept=".csv"
-                        onChange={handleMasterCsvUpload}
-                        disabled={uploading}
-                        className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
-                    />
+                    <input type="file" accept=".csv" onChange={handleMasterCsvUpload} disabled={uploading} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
                     {uploading && <span className="text-blue-600 font-bold animate-pulse">登録中...</span>}
-                </div>
-                <div className="mt-4 text-xs text-slate-400 bg-slate-50 p-3 rounded">
-                    <strong>CSV例 (ヘッダーがあってもOK):</strong><br/>
-                    日付, 勤務形態<br/>
-                    2025/04/01, A<br/>
-                    2025/04/02, B
                 </div>
             </div>
         </div>
