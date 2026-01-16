@@ -3,14 +3,17 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/utils/supabase/client'
 import { useRouter } from 'next/navigation'
+import * as XLSX from 'xlsx' // Excel出力用
 
+// ★管理者メールアドレス
 const ADMIN_EMAILS = [
   'mitamuraka@haguroko.ed.jp',
   'tomonoem@haguroko.ed.jp'
 ].map(email => email.toLowerCase())
 
+// 集計項目定義
 const TIME_ITEMS = [
-  { key: 'leave_hourly', label: '時間年休' },
+  { key: 'leave_hourly', label: '時間休' },
   { key: 'overtime_weekday', label: '平日残業' },
   { key: 'overtime_weekday2', label: '平日2' },
   { key: 'overtime_late_night', label: '深夜' },
@@ -38,10 +41,11 @@ export default function AdminPage() {
   const [selectedMonth, setSelectedMonth] = useState(new Date())
   const [allowances, setAllowances] = useState<any[]>([])
   const [schedules, setSchedules] = useState<any[]>([])
-  const [users, setUsers] = useState<{id: string, email: string}[]>([]) 
-  const [selectedUser, setSelectedUser] = useState<string>('all') 
-  const [viewMode, setViewMode] = useState<'allowance' | 'schedule'>('allowance')
+  const [aggregatedData, setAggregatedData] = useState<any[]>([]) // 集計済みデータ
+  
+  const [viewMode, setViewMode] = useState<'summary' | 'details'>('summary') // モード変更
 
+  // 初期化チェック
   useEffect(() => {
     const checkAdmin = async () => {
       const { data: { user } } = await supabase.auth.getUser()
@@ -63,6 +67,7 @@ export default function AdminPage() {
     fetchData(newDate)
   }
 
+  // データ取得＆集計
   const fetchData = async (date: Date) => {
     setLoading(true)
     const y = date.getFullYear()
@@ -70,245 +75,266 @@ export default function AdminPage() {
     const startDate = `${y}-${String(m).padStart(2, '0')}-01`
     const endDate = `${y}-${String(m).padStart(2, '0')}-31`
 
+    // 1. 全データを取得
     const { data: allowData } = await supabase.from('allowances').select('*').gte('date', startDate).lte('date', endDate).order('date')
     const { data: schedData } = await supabase.from('daily_schedules').select('*').gte('date', startDate).lte('date', endDate)
     
-    // ★修正: ユーザーリストを両方のテーブルから作成
-    const userMap = new Map()
-    allowData?.forEach((a: any) => { if(a.user_email) userMap.set(a.user_id, a.user_email) })
-    schedData?.forEach((s: any) => { if(s.user_email) userMap.set(s.user_id, s.user_email) }) // schedule側のemailも使用
-
-    const userList = Array.from(userMap.entries()).map(([id, email]) => ({ id, email }))
-    setUsers(userList)
-
     setAllowances(allowData || [])
     setSchedules(schedData || [])
+
+    // 2. ユーザーリストの統合（ここが重要：どちらかにデータがあればリストに載せる）
+    const userMap = new Map<string, string>() // ID -> Email
+    
+    // 手当データからユーザー抽出
+    allowData?.forEach((a: any) => { if(a.user_email) userMap.set(a.user_id, a.user_email) })
+    // 勤務データからユーザー抽出（waw2716対策）
+    schedData?.forEach((s: any) => { 
+        if(s.user_email && !userMap.has(s.user_id)) {
+            userMap.set(s.user_id, s.user_email)
+        }
+    })
+
+    // 3. 集計処理
+    const aggResult: any[] = []
+    
+    userMap.forEach((email, userId) => {
+        // 個人のデータを抽出
+        const myAllowances = allowData?.filter((a: any) => a.user_id === userId) || []
+        const mySchedules = schedData?.filter((s: any) => s.user_id === userId) || []
+
+        // 基本情報
+        const row: any = {
+            id: userId,
+            name: email,
+            total_amount: myAllowances.reduce((sum: number, a: any) => sum + a.amount, 0),
+            allowance_count: myAllowances.length,
+            // 勤務パターン集計
+            patterns: {},
+            // 年休計算 (初期値20日とする)
+            annual_leave_start: 20,
+            annual_leave_used: 0,
+            annual_leave_remain: 20,
+            // 時間集計
+            time_totals: {}
+        }
+
+        // 時間項目の初期化
+        TIME_ITEMS.forEach(t => row.time_totals[t.key] = 0)
+
+        // スケジュール解析
+        mySchedules.forEach((s: any) => {
+            // パターンカウント
+            if (s.work_pattern_code) {
+                row.patterns[s.work_pattern_code] = (row.patterns[s.work_pattern_code] || 0) + 1
+            }
+            // 年休計算
+            if (s.leave_annual === '1日') row.annual_leave_used += 1.0
+            if (s.leave_annual === '半日') row.annual_leave_used += 0.5
+            
+            // 時間計算
+            TIME_ITEMS.forEach(t => {
+                if (s[t.key]) row.time_totals[t.key] = addTime(row.time_totals[t.key], s[t.key])
+            })
+        })
+
+        // 残日数計算
+        row.annual_leave_remain = row.annual_leave_start - row.annual_leave_used
+        
+        aggResult.push(row)
+    })
+
+    setAggregatedData(aggResult)
     setLoading(false)
   }
 
-  const downloadCSV = () => {
-    let csvContent = "data:text/csv;charset=utf-8,\uFEFF"; 
-    
-    if (viewMode === 'allowance') {
-      csvContent += "氏名(Email),支給合計額,回数,内訳\n";
-      aggregateAllowances().forEach(row => {
-        const details = row.details.map((d: any) => `${d.date.slice(8)}日:${d.activity_type}`).join(' / ');
-        csvContent += `${row.name},${row.total},${row.count},"${details}"\n`;
-      });
-    } else {
-      const header = ["氏名", "勤務形態(回数)", "年休(日)", ...TIME_ITEMS.map(t => t.label)].join(",");
-      csvContent += header + "\n";
-      aggregateSchedules().forEach(row => {
-        const patterns = Object.entries(row.patterns).map(([k, v]) => `${k}:${v}`).join(' ');
-        const times = TIME_ITEMS.map(t => formatMinutes(row.time_totals[t.key])).join(",");
-        csvContent += `${row.name},"${patterns}",${row.leave_annual_days},${times}\n`;
-      });
-    }
-
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `allowance_report_${selectedMonth.getFullYear()}_${selectedMonth.getMonth()+1}_${viewMode}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  }
-
-  const aggregateAllowances = () => {
-    const agg: Record<string, { name: string, total: number, count: number, details: any[] }> = {}
-    allowances.forEach(row => {
-      if (selectedUser !== 'all' && row.user_id !== selectedUser) return;
-      const key = row.user_id
-      if (!agg[key]) agg[key] = { name: row.user_email, total: 0, count: 0, details: [] }
-      agg[key].total += row.amount
-      agg[key].count += 1
-      agg[key].details.push(row)
-    })
-    return Object.values(agg)
-  }
-
+  // 時間足し算ヘルパー
   const addTime = (currentMinutes: number, timeStr: string | null) => {
     if (!timeStr || !timeStr.includes(':')) return currentMinutes
     const [h, m] = timeStr.split(':').map(Number)
     return currentMinutes + (h * 60) + m
   }
   
+  // 分 -> 時間文字列
   const formatMinutes = (minutes: number) => {
-    if (minutes === 0) return '-'
+    if (minutes === 0) return ''
     const h = Math.floor(minutes / 60)
     const m = minutes % 60
     return `${h}:${String(m).padStart(2, '0')}`
   }
 
-  const aggregateSchedules = () => {
-    const agg: Record<string, any> = {}
-    
-    schedules.forEach(row => {
-      if (selectedUser !== 'all' && row.user_id !== selectedUser) return;
+  // --- Excel出力機能 ---
+  const downloadExcel = () => {
+    const wb = XLSX.utils.book_new()
+    const y = selectedMonth.getFullYear()
+    const m = selectedMonth.getMonth() + 1
 
-      const key = row.user_id
-      if (!agg[key]) {
-        // user_emailがdaily_schedulesにあればそれを使う、なければallowancesから探す
-        let email = row.user_email 
-        if (!email) {
-            const foundUser = users.find(u => u.id === key)
-            email = foundUser ? foundUser.email : key.slice(0, 8) + '...'
+    // データ整形
+    const excelData = aggregatedData.map(row => {
+        // 動的なキー（時間項目）を展開
+        const timeData: any = {}
+        TIME_ITEMS.forEach(t => {
+            timeData[t.label] = formatMinutes(row.time_totals[t.key]) || '-'
+        })
+        
+        // 勤務パターン文字列化
+        const patternStr = Object.entries(row.patterns)
+            .map(([k, v]) => `${k}:${v}回`).join(' ')
+
+        return {
+            "氏名(Email)": row.name,
+            "手当支給額": row.total_amount,
+            "手当回数": row.allowance_count,
+            "年休(付与)": row.annual_leave_start,
+            "年休(使用)": row.annual_leave_used,
+            "年休(残)": row.annual_leave_remain,
+            "勤務内訳": patternStr,
+            ...timeData
         }
-
-        agg[key] = {
-          name: email,
-          patterns: {},
-          leave_annual_days: 0,
-          time_totals: {},
-        }
-        TIME_ITEMS.forEach(item => agg[key].time_totals[item.key] = 0)
-      }
-
-      if (row.work_pattern_code) {
-        const code = row.work_pattern_code
-        agg[key].patterns[code] = (agg[key].patterns[code] || 0) + 1
-      }
-
-      if (row.leave_annual === '1日') agg[key].leave_annual_days += 1
-      if (row.leave_annual === '半日') agg[key].leave_annual_days += 0.5
-
-      TIME_ITEMS.forEach(item => {
-        if (row[item.key]) {
-          agg[key].time_totals[item.key] = addTime(agg[key].time_totals[item.key], row[item.key])
-        }
-      })
     })
-    return Object.values(agg)
+
+    const ws = XLSX.utils.json_to_sheet(excelData)
+    
+    // 列幅の調整
+    const wscols = [
+        { wch: 30 }, // Email
+        { wch: 10 }, // 金額
+        { wch: 8 },  // 回数
+        { wch: 8 },  // 年休
+        { wch: 8 },  // 年休
+        { wch: 8 },  // 年休
+        { wch: 20 }, // 勤務内訳
+    ]
+    ws['!cols'] = wscols
+
+    XLSX.utils.book_append_sheet(wb, ws, `${m}月集計`)
+    XLSX.writeFile(wb, `勤務手当集計_${y}年${m}月.xlsx`)
   }
 
   if (!isAdmin) return <div className="p-10 text-center">確認中...</div>
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <div className="bg-slate-800 text-white p-4 shadow-md sticky top-0 z-10 flex justify-between items-center">
+    <div className="min-h-screen bg-slate-100 text-slate-900">
+      {/* ヘッダー */}
+      <div className="bg-slate-800 text-white p-4 shadow-md sticky top-0 z-20 flex justify-between items-center">
         <h1 className="font-bold text-lg">事務担当者用ダッシュボード</h1>
-        <button onClick={() => router.push('/')} className="text-xs bg-slate-600 px-3 py-1 rounded hover:bg-slate-500">戻る</button>
+        <div className="flex gap-4 items-center">
+            <span className="text-xs text-slate-300">ログイン中: {ADMIN_EMAILS.find(e => e === ADMIN_EMAILS[0]) ? '管理者' : ''}</span>
+            <button onClick={() => router.push('/')} className="text-xs bg-slate-600 px-4 py-2 rounded hover:bg-slate-500 font-bold">アプリに戻る</button>
+        </div>
       </div>
 
-      <div className="max-w-7xl mx-auto p-6">
+      <div className="max-w-[95%] mx-auto p-6">
         
-        <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4 bg-white p-4 rounded-xl shadow-sm border border-slate-200">
+        {/* コントロールパネル */}
+        <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4 bg-white p-4 rounded-xl shadow border border-slate-200">
+          
           <div className="flex items-center gap-4">
-            <button onClick={() => handleMonthChange(-1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold">‹</button>
-            <span className="text-xl font-bold w-32 text-center">{selectedMonth.getFullYear()}年 {selectedMonth.getMonth() + 1}月</span>
-            <button onClick={() => handleMonthChange(1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold">›</button>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-bold text-slate-500">表示対象:</span>
-            <select 
-              value={selectedUser} 
-              onChange={(e) => setSelectedUser(e.target.value)}
-              className="p-2 border border-slate-300 rounded text-sm font-bold min-w-[200px]"
-            >
-              <option value="all">全員を表示</option>
-              {users.map(u => (
-                <option key={u.id} value={u.id}>{u.email}</option>
-              ))}
-            </select>
+            <button onClick={() => handleMonthChange(-1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold text-slate-500">‹</button>
+            <span className="text-2xl font-extrabold text-slate-800 w-40 text-center">{selectedMonth.getFullYear()}年 {selectedMonth.getMonth() + 1}月</span>
+            <button onClick={() => handleMonthChange(1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold text-slate-500">›</button>
           </div>
 
           <div className="flex gap-4">
-             <div className="flex bg-slate-100 p-1 rounded-lg">
-               <button onClick={() => setViewMode('allowance')} className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${viewMode === 'allowance' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>💰 手当集計</button>
-               <button onClick={() => setViewMode('schedule')} className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${viewMode === 'schedule' ? 'bg-white text-green-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>⏰ 勤務集計</button>
-             </div>
-             <button onClick={downloadCSV} className="bg-green-600 text-white px-4 py-2 rounded-lg text-xs font-bold hover:bg-green-700 shadow-sm flex items-center gap-1">
-               📥 CSV出力
+             {/* モード切替は一旦廃止して、一画面で見せる形式に変更（見やすさ優先） */}
+             <button onClick={downloadExcel} className="bg-green-600 text-white px-6 py-3 rounded-lg text-sm font-bold hover:bg-green-700 shadow flex items-center gap-2 transition-transform active:scale-95">
+               📊 Excel出力 (.xlsx)
              </button>
           </div>
         </div>
 
         {loading ? (
-          <div className="text-center py-10 text-slate-500">読み込み中...</div>
+          <div className="text-center py-20 text-slate-500 font-bold animate-pulse">データを集計中...</div>
         ) : (
-          <div className="bg-white rounded-xl shadow-sm overflow-hidden border border-slate-200">
-            {viewMode === 'allowance' && (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm">
-                  <thead className="bg-slate-100 text-slate-600 border-b">
-                    <tr>
-                      <th className="p-4 font-bold">氏名 (Email)</th>
-                      <th className="p-4 font-bold text-right">支給合計額</th>
-                      <th className="p-4 font-bold text-right">回数</th>
-                      <th className="p-4 font-bold">内訳（日付: 内容）</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {aggregateAllowances().length === 0 ? (
-                      <tr><td colSpan={4} className="p-6 text-center text-slate-400">データがありません</td></tr>
-                    ) : (
-                      aggregateAllowances().map((user: any, i) => (
-                        <tr key={i} className="hover:bg-slate-50">
-                          <td className="p-4 font-bold">{user.name}</td>
-                          <td className="p-4 text-right font-bold text-blue-600">¥{user.total.toLocaleString()}</td>
-                          <td className="p-4 text-right">{user.count}回</td>
-                          <td className="p-4 text-xs text-slate-500 max-w-md">
-                            <div className="flex flex-wrap gap-1">
-                              {user.details.map((d: any) => (
-                                <span key={d.id} className="bg-slate-100 px-1.5 py-0.5 rounded border">
-                                  {d.date.slice(8)}日:{d.activity_type}
-                                </span>
-                              ))}
-                            </div>
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            {viewMode === 'schedule' && (
-              <div className="overflow-x-auto">
+          <div className="bg-white rounded-xl shadow overflow-hidden border border-slate-200">
+            <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm whitespace-nowrap">
-                  <thead className="bg-green-50 text-green-800 border-b border-green-100">
+                  <thead className="bg-slate-800 text-white">
                     <tr>
-                      <th className="p-3 font-bold sticky left-0 bg-green-50 z-10 border-r">氏名</th>
-                      <th className="p-3 font-bold min-w-[150px]">勤務形態 (回数)</th>
-                      <th className="p-3 font-bold text-center bg-yellow-50/50">年休 (日)</th>
+                      <th className="p-4 font-bold sticky left-0 bg-slate-800 z-10 border-r border-slate-600">氏名 (メールアドレス)</th>
+                      <th className="p-4 font-bold text-center bg-blue-900 border-l border-slate-600">手当支給額</th>
+                      
+                      {/* 年休エリア */}
+                      <th className="p-4 font-bold text-center bg-orange-900 border-l border-slate-600" colSpan={3}>年休管理 (20日基準)</th>
+                      
+                      <th className="p-4 font-bold text-left min-w-[150px] border-l border-slate-600">勤務パターン回数</th>
+                      
+                      {/* 時間集計エリア */}
                       {TIME_ITEMS.map(item => (
-                        <th key={item.key} className="p-3 font-bold text-center border-l border-slate-100">{item.label}</th>
+                        <th key={item.key} className="p-4 font-bold text-center border-l border-slate-600 min-w-[80px]">{item.label}</th>
                       ))}
                     </tr>
+                    {/* サブヘッダー（年休の内訳用） */}
+                    <tr className="bg-orange-800 text-xs text-orange-100">
+                        <th className="sticky left-0 bg-slate-800 z-10 border-r border-slate-600"></th>
+                        <th className="bg-blue-800 border-l border-slate-600"></th>
+                        
+                        <th className="p-1 text-center border-l border-orange-700">使用</th>
+                        <th className="p-1 text-center border-l border-orange-700">残日数</th>
+                        <th className="p-1 text-center border-l border-orange-700">時間休計</th>
+                        
+                        <th className="border-l border-slate-600"></th>
+                        {TIME_ITEMS.map(i => <th key={i.key} className="border-l border-slate-600"></th>)}
+                    </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {aggregateSchedules().length === 0 ? (
-                      <tr><td colSpan={20} className="p-6 text-center text-slate-400">データがありません</td></tr>
+                  
+                  <tbody className="divide-y divide-slate-200">
+                    {aggregatedData.length === 0 ? (
+                      <tr><td colSpan={25} className="p-10 text-center text-slate-400 font-bold">この月のデータはありません</td></tr>
                     ) : (
-                      aggregateSchedules().map((user: any, i) => (
-                        <tr key={i} className="hover:bg-slate-50 text-slate-900">
-                          <td className="p-3 font-bold sticky left-0 bg-white border-r z-10">{user.name}</td>
-                          <td className="p-3">
-                            <div className="flex gap-2">
+                      aggregatedData.map((user, i) => (
+                        <tr key={i} className="hover:bg-yellow-50 transition-colors text-slate-900">
+                          
+                          {/* 名前 */}
+                          <td className="p-4 font-bold sticky left-0 bg-white border-r border-slate-200 z-10">
+                            {user.name}
+                          </td>
+                          
+                          {/* 金額 */}
+                          <td className="p-4 text-right font-extrabold text-blue-700 border-l border-slate-100 bg-blue-50/30">
+                            ¥{user.total_amount.toLocaleString()}
+                          </td>
+
+                          {/* 年休: 使用日数 */}
+                          <td className="p-4 text-center font-bold text-orange-700 border-l border-slate-100 bg-orange-50/20">
+                            {user.annual_leave_used > 0 ? `-${user.annual_leave_used}日` : '-'}
+                          </td>
+                          
+                          {/* 年休: 残り日数 (わかりやすくバッジ表示) */}
+                          <td className="p-4 text-center border-l border-slate-100 bg-orange-50/20">
+                            <span className={`px-2 py-1 rounded font-bold ${user.annual_leave_remain < 5 ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-700'}`}>
+                                残 {user.annual_leave_remain}日
+                            </span>
+                          </td>
+
+                          {/* 年休: 時間休の合計 */}
+                          <td className="p-4 text-center font-bold text-slate-600 border-l border-slate-100 bg-orange-50/20">
+                             {formatMinutes(user.time_totals['leave_hourly']) || '-'}
+                          </td>
+
+                          {/* 勤務パターン内訳 */}
+                          <td className="p-4 text-xs border-l border-slate-100">
+                            <div className="flex flex-wrap gap-1">
                               {Object.entries(user.patterns).map(([code, count]) => (
-                                <span key={code} className="font-mono bg-slate-100 px-1.5 rounded text-xs border border-slate-200">
-                                  <strong className={String(code).includes('休') ? 'text-red-500' : ''}>{code as string}</strong>:{count as number}
+                                <span key={code} className={`px-1.5 py-0.5 rounded border ${String(code).includes('休') ? 'bg-red-50 border-red-200 text-red-600' : 'bg-slate-100 border-slate-200'}`}>
+                                  <b>{code as string}</b>: {count as number}
                                 </span>
                               ))}
                             </div>
                           </td>
-                          <td className="p-3 text-center font-bold bg-yellow-50/30">
-                            {user.leave_annual_days > 0 ? user.leave_annual_days + '日' : '-'}
-                          </td>
+
+                          {/* 各時間の詳細 */}
                           {TIME_ITEMS.map(item => (
-                            <td key={item.key} className={`p-3 text-center border-l border-slate-100 ${user.time_totals[item.key] > 0 ? 'font-bold' : 'text-slate-300'}`}>
-                              {formatMinutes(user.time_totals[item.key])}
+                            <td key={item.key} className={`p-4 text-center border-l border-slate-100 ${user.time_totals[item.key] > 0 ? 'font-bold bg-yellow-50' : 'text-slate-300'}`}>
+                              {formatMinutes(user.time_totals[item.key]) || '-'}
                             </td>
                           ))}
+
                         </tr>
                       ))
                     )}
                   </tbody>
                 </table>
-              </div>
-            )}
+            </div>
           </div>
         )}
       </div>
