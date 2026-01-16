@@ -7,11 +7,11 @@ import Calendar from 'react-calendar'
 import 'react-calendar/dist/Calendar.css'
 import { ACTIVITY_TYPES, DESTINATIONS, calculateAmount } from '@/utils/allowanceRules'
 
-// ★管理者のメールアドレスリスト
+// ★管理者のメールアドレスリスト（重要：すべて小文字で入力してください）
 const ADMIN_EMAILS = [
   'mitamuraka@haguroko.ed.jp',
   'tomonoem@haguroko.ed.jp'
-]
+].map(email => email.toLowerCase()) // 念のため自動で小文字に変換
 
 type Allowance = {
   id: number
@@ -40,15 +40,14 @@ export default function Home() {
   
   // 入力フォームの状態
   const [selectedDate, setSelectedDate] = useState<Date>(new Date())
-  const [dayType, setDayType] = useState<string>('---') // 勤務形態
-  const [activityId, setActivityId] = useState<string>('') // 初期値は空にする
+  const [dayType, setDayType] = useState<string>('---')
+  const [activityId, setActivityId] = useState<string>('')
   const [destinationId, setDestinationId] = useState<string>('school')
   const [destinationDetail, setDestinationDetail] = useState('')
   const [isDriving, setIsDriving] = useState(false)
   const [isAccommodation, setIsAccommodation] = useState(false)
   const [calculatedAmount, setCalculatedAmount] = useState(0)
 
-  // ユーザー情報
   const [userEmail, setUserEmail] = useState('')
 
   useEffect(() => {
@@ -61,7 +60,6 @@ export default function Home() {
     init()
   }, [])
 
-  // 日付が変わったら「勤務区分」を取得
   useEffect(() => {
     const updateDayInfo = async () => {
       const dateStr = formatDate(selectedDate)
@@ -73,24 +71,17 @@ export default function Home() {
       
       const type = data?.day_type || (selectedDate.getDay() % 6 === 0 ? '休日(仮)' : '勤務日(仮)')
       setDayType(type)
-      
-      // 日付が変わったら選択をリセット
       setActivityId('') 
     }
     updateDayInfo()
   }, [selectedDate])
 
-  // 金額自動計算
   useEffect(() => {
-    // "勤務日"や"授業"が含まれていれば勤務日扱い
     const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
-    
-    // activityIdが空の場合は0円
     if (!activityId) {
       setCalculatedAmount(0)
       return
     }
-
     const amt = calculateAmount(activityId, isDriving, destinationId, isWorkDay)
     setCalculatedAmount(amt)
   }, [activityId, isDriving, destinationId, dayType])
@@ -100,7 +91,6 @@ export default function Home() {
     setAllowances(data || [])
   }
 
-  // ログアウト処理
   const handleLogout = async () => {
     await supabase.auth.signOut()
     router.push('/login')
@@ -139,7 +129,6 @@ export default function Home() {
     if (!error) fetchAllowances()
   }
 
-  // 表示月の変更操作
   const handlePrevMonth = () => {
     const newDate = new Date(selectedDate)
     newDate.setMonth(selectedDate.getMonth() - 1)
@@ -151,7 +140,6 @@ export default function Home() {
     setSelectedDate(newDate)
   }
 
-  // 表示中の月の合計
   const calculateMonthTotal = () => {
     const targetMonth = selectedDate.getMonth()
     const targetYear = selectedDate.getFullYear()
@@ -163,7 +151,6 @@ export default function Home() {
       .reduce((sum, item) => sum + item.amount, 0)
   }
 
-  // カレンダーのドット表示
   const getTileContent = ({ date, view }: { date: Date; view: string }) => {
     if (view !== 'month') return null
     const dateStr = formatDate(date)
@@ -171,14 +158,18 @@ export default function Home() {
     return hasData ? <div className="flex justify-center mt-1"><div className="w-1.5 h-1.5 bg-blue-500 rounded-full"></div></div> : null
   }
 
-  const isAdmin = ADMIN_EMAILS.includes(userEmail)
+  // ★重要：大文字小文字を無視して比較する
+  const isAdmin = ADMIN_EMAILS.includes(userEmail.toLowerCase())
   const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
 
   return (
     <div className="min-h-screen bg-slate-50 pb-20">
+       {/* ★管理者の場合のみ、ここに黒いバーが表示されます */}
        {isAdmin && (
-        <div className="bg-slate-800 text-white text-center py-2 text-xs">
-          <a href="/admin" className="underline">事務担当者ページ（管理画面）</a>
+        <div className="bg-slate-800 text-white text-center py-3 text-sm font-bold shadow-md">
+          <a href="/admin" className="underline hover:text-blue-300 transition">
+            事務担当者ページ（管理画面）へ移動
+          </a>
         </div>
       )}
 
@@ -244,12 +235,10 @@ export default function Home() {
                 className="w-full bg-slate-100 p-3 rounded-lg outline-none font-bold text-slate-700 text-sm"
               >
                 <option value="">選択してください</option>
-                {/* 制限を撤廃してすべて表示 */}
                 {ACTIVITY_TYPES.map(type => (
                   <option key={type.id} value={type.id}>{type.label}</option>
                 ))}
               </select>
-              {/* 注意書きのみ表示 */}
               {isWorkDay && (activityId === 'A' || activityId === 'B') && (
                 <p className="text-[10px] text-orange-400 mt-1 text-right">
                   ⚠️ カレンダー上は勤務日ですが、休日手当を選択中です
