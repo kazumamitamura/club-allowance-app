@@ -57,6 +57,14 @@ type WorkPattern = {
   description: string
 }
 
+type DailySchedule = {
+  id: number
+  user_id: string
+  date: string
+  work_pattern_code: string | null
+  [key: string]: any
+}
+
 const formatDate = (date: Date) => {
   const y = date.getFullYear()
   const m = ('00' + (date.getMonth() + 1)).slice(-2)
@@ -70,6 +78,7 @@ export default function Home() {
   
   const [userEmail, setUserEmail] = useState('')
   const [allowances, setAllowances] = useState<Allowance[]>([])
+  const [schedules, setSchedules] = useState<DailySchedule[]>([]) // カレンダー表示用
   const [workPatterns, setWorkPatterns] = useState<WorkPattern[]>([])
   
   // 入力フォームの状態
@@ -80,10 +89,10 @@ export default function Home() {
   // 勤務パターン
   const [selectedPattern, setSelectedPattern] = useState('C')
   
-  // 詳細項目（★修正：エラー回避のため any 型を使用）
+  // 詳細項目
   const [details, setDetails] = useState<any>({})
   
-  // UI制御用: カテゴリが開いているかどうか
+  // UI制御用
   const [openCategory, setOpenCategory] = useState<'overtime' | 'leave' | null>(null)
 
   // 手当関連
@@ -99,7 +108,11 @@ export default function Home() {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) { router.push('/login'); return }
       setUserEmail(user.email || '')
+      
+      // データ取得
       fetchAllowances()
+      fetchSchedules() // カレンダー表示用のスケジュール取得
+      
       const { data: patterns } = await supabase.from('work_patterns').select('*').order('code')
       if (patterns) setWorkPatterns(patterns)
     }
@@ -120,7 +133,7 @@ export default function Home() {
       const type = calendarData?.day_type || (selectedDate.getDay() % 6 === 0 ? '休日(仮)' : '勤務日(仮)')
       setDayType(type)
       
-      // 2. 個人の勤務・休暇スケジュールの取得
+      // 2. 個人の勤務・休暇スケジュールの取得 (単日)
       const { data: { user } } = await supabase.auth.getUser()
       if (user) {
         const { data: scheduleData } = await supabase
@@ -151,6 +164,7 @@ export default function Home() {
           
         } else {
           setIsRegistered(false)
+          // 未登録時はデフォルト設定（本来は曜日判定などが望ましい）
           setSelectedPattern('C') 
           setDetails({})
         }
@@ -191,7 +205,14 @@ export default function Home() {
     setAllowances(data || [])
   }
 
-  // --- 詳細項目の操作ヘルパー ---
+  // カレンダー表示用のスケジュール全取得
+  const fetchSchedules = async () => {
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+    const { data } = await supabase.from('daily_schedules').select('*').eq('user_id', user.id)
+    setSchedules(data || [])
+  }
+
   const updateDetail = (key: string, value: string) => {
     setDetails((prev: any) => {
       const next = { ...prev }
@@ -209,13 +230,12 @@ export default function Home() {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
 
-    // 1. 勤務・詳細データの保存（★修正：any型でエラー回避）
     const scheduleData: any = {
       user_id: user.id,
       date: dateStr,
       work_pattern_code: selectedPattern,
       leave_annual: details['leave_annual'] || null,
-    }; // ★★★ ここにセミコロンを追加してエラーを解消しました ★★★
+    };
 
     [...OVERTIME_ITEMS, ...LEAVE_ITEMS_TIME].forEach(item => {
       scheduleData[item.key] = details[item.key] || null
@@ -226,15 +246,12 @@ export default function Home() {
       .upsert(scheduleData, { onConflict: 'user_id, date' })
 
     if (scheduleError) {
-      console.error('Save Error:', scheduleError)
-      alert('保存エラー(勤務): ' + scheduleError.message)
+      alert('保存エラー: ' + scheduleError.message)
       return
     }
 
-    // 2. 部活動手当の保存
     if (activityId) {
       await supabase.from('allowances').delete().eq('user_id', user.id).eq('date', dateStr)
-      
       const { error: allowanceError } = await supabase.from('allowances').insert({
         user_id: user.id,
         user_email: user.email,
@@ -246,9 +263,8 @@ export default function Home() {
         is_accommodation: isAccommodation,
         amount: calculatedAmount,
       })
-      
       if (allowanceError) {
-          alert('保存エラー(手当): ' + allowanceError.message)
+          alert('手当保存エラー: ' + allowanceError.message)
           return
       }
       fetchAllowances()
@@ -259,12 +275,13 @@ export default function Home() {
     
     setIsRegistered(true)
     setOpenCategory(null)
+    fetchSchedules() // カレンダー表示を更新
     alert('保存しました')
   }
 
   // --- 一括登録機能 ---
   const handleBulkRegister = async () => {
-    if (!confirm(`${selectedDate.getMonth()+1}月の未入力日を、すべて「デフォルト勤務（C）」として一括登録しますか？\n（すでに入力済みの日は上書きされません）`)) return
+    if (!confirm(`${selectedDate.getMonth()+1}月の未入力日を、すべて「デフォルト勤務（C）」として一括登録しますか？`)) return
     
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
@@ -290,6 +307,7 @@ export default function Home() {
     if (error) alert('エラー: ' + error.message)
     else {
         alert('一括登録が完了しました！')
+        fetchSchedules() // カレンダー更新
         router.refresh()
     }
   }
@@ -309,11 +327,32 @@ export default function Home() {
     return allowances.filter(i => { const d = new Date(i.date); return d.getMonth() === m && d.getFullYear() === y }).reduce((s, i) => s + i.amount, 0)
   }
   
+  // ★修正: カレンダーに文字(A,B...)を表示するロジック
   const getTileContent = ({ date, view }: { date: Date; view: string }) => {
     if (view !== 'month') return null
     const dateStr = formatDate(date)
-    const hasData = allowances.some(i => i.date === dateStr)
-    return hasData ? <div className="flex justify-center mt-1"><div className="w-1.5 h-1.5 bg-blue-500 rounded-full"></div></div> : null
+    
+    // スケジュールデータを探す
+    const schedule = schedules.find(s => s.date === dateStr)
+    // 手当データがあるか
+    const hasAllowance = allowances.some(i => i.date === dateStr)
+
+    return (
+      <div className="flex flex-col items-center justify-center mt-1 h-4">
+        {/* 勤務パターンコードを表示 */}
+        {schedule?.work_pattern_code && (
+           <span className={`text-[10px] font-extrabold leading-none ${
+               schedule.work_pattern_code.includes('休') ? 'text-red-500' : 'text-slate-600'
+           }`}>
+             {schedule.work_pattern_code}
+           </span>
+        )}
+        {/* 手当がある日は青い点を表示 */}
+        {hasAllowance && (
+            <div className="w-1 h-1 bg-blue-500 rounded-full mt-0.5"></div>
+        )}
+      </div>
+    )
   }
   
   const isAdmin = ADMIN_EMAILS.includes(userEmail.toLowerCase())
@@ -352,7 +391,15 @@ export default function Home() {
 
       <div className="px-4 max-w-md mx-auto space-y-6">
         <div className="bg-white p-4 rounded-3xl shadow-sm">
-          <Calendar onChange={(val) => setSelectedDate(val as Date)} value={selectedDate} activeStartDate={selectedDate} onActiveStartDateChange={({ activeStartDate }) => activeStartDate && setSelectedDate(activeStartDate)} locale="ja-JP" tileContent={getTileContent} className="w-full border-none" />
+          <Calendar 
+            onChange={(val) => setSelectedDate(val as Date)} 
+            value={selectedDate} 
+            activeStartDate={selectedDate} 
+            onActiveStartDateChange={({ activeStartDate }) => activeStartDate && setSelectedDate(activeStartDate)} 
+            locale="ja-JP" 
+            tileContent={getTileContent} 
+            className="w-full border-none" 
+          />
         </div>
 
         <div className={`p-6 rounded-3xl shadow-sm border ${isRegistered ? 'bg-green-50 border-green-200' : 'bg-white border-slate-200'}`}>
@@ -367,43 +414,42 @@ export default function Home() {
             
             {/* 1. 勤務パターン */}
             <div className="bg-white p-3 rounded-xl border border-slate-200">
-              <label className="block text-xs font-bold text-slate-500 mb-1">勤務パターン</label>
+              <label className="block text-xs font-bold text-slate-600 mb-1">勤務パターン</label>
               <div className="flex items-center gap-2">
                 <select 
                   value={selectedPattern} 
                   onChange={(e) => setSelectedPattern(e.target.value)}
-                  className="flex-1 bg-white p-2 rounded border border-slate-300 font-bold text-slate-900"
+                  className="flex-1 bg-white p-2 rounded border border-slate-300 font-bold text-slate-900" // ★文字色を濃く
                 >
                   {workPatterns.map(p => (
                     <option key={p.id} value={p.code}>{p.code} ({p.start_time.slice(0,5)}-{p.end_time.slice(0,5)})</option>
                   ))}
                 </select>
-                <div className="text-xs text-slate-500 w-1/3 text-right">{currentPatternDetail?.description}</div>
+                <div className="text-xs text-slate-600 font-bold w-1/3 text-right">{currentPatternDetail?.description}</div>
               </div>
             </div>
 
-            {/* 2. 超過勤務・遅刻早退 (アコーディオン風) */}
+            {/* 2. 超過勤務・遅刻早退 */}
             <div className={`bg-white rounded-xl border transition-all ${openCategory === 'overtime' ? 'border-orange-400 ring-2 ring-orange-100' : hasOvertime ? 'border-orange-300' : 'border-slate-200'}`}>
               <button type="button" onClick={() => setOpenCategory(openCategory === 'overtime' ? null : 'overtime')} className="w-full flex justify-between items-center p-3 text-left">
                 <div className="flex items-center gap-2">
                   <span className="text-lg">⏰</span>
-                  <span className={`text-xs font-bold ${hasOvertime ? 'text-orange-600' : 'text-slate-500'}`}>超過勤務・遅刻早退</span>
+                  <span className={`text-xs font-bold ${hasOvertime ? 'text-orange-600' : 'text-slate-600'}`}>超過勤務・遅刻早退</span>
                 </div>
                 <span className="text-slate-400 text-xs">{openCategory === 'overtime' ? '▲ 閉じる' : hasOvertime ? '詳細あり ▼' : '追加する +'}</span>
               </button>
 
               {(openCategory === 'overtime' || hasOvertime) && (
                 <div className="p-3 pt-0 border-t border-slate-100 bg-orange-50/30 rounded-b-xl space-y-3">
-                   {/* 項目追加セレクトボックス */}
                    {openCategory === 'overtime' && (
                      <div className="mb-2">
-                       <p className="text-[10px] text-slate-400 mb-1">項目を選択して時間を入力:</p>
+                       <p className="text-[10px] text-slate-500 mb-1">項目を選択して時間を入力:</p>
                        <div className="flex flex-wrap gap-2">
                          {OVERTIME_ITEMS.map(item => (
                            <button 
                              key={item.key} type="button"
                              onClick={() => updateDetail(item.key, details[item.key] ? '' : '00:00')} 
-                             className={`text-xs px-2 py-1 rounded border ${details[item.key] ? 'bg-orange-500 text-white border-orange-600' : 'bg-white text-slate-500 border-slate-200'}`}
+                             className={`text-xs px-2 py-1 rounded border font-bold ${details[item.key] ? 'bg-orange-500 text-white border-orange-600' : 'bg-white text-slate-600 border-slate-300'}`}
                            >
                              {item.label}
                            </button>
@@ -411,30 +457,28 @@ export default function Home() {
                        </div>
                      </div>
                    )}
-                   
-                   {/* 入力欄リスト */}
                    {OVERTIME_ITEMS.filter(i => details[i.key] !== undefined).map(item => (
                      <div key={item.key} className="flex items-center gap-2 animate-fadeIn">
-                       <label className="text-xs font-bold text-slate-600 w-20">{item.label}</label>
+                       <label className="text-xs font-bold text-slate-700 w-20">{item.label}</label>
                        <input 
                          type="text" placeholder="1:00"
                          value={details[item.key] || ''}
                          onChange={(e) => updateDetail(item.key, e.target.value)}
-                         className="flex-1 p-2 rounded border border-slate-300 text-sm"
+                         className="flex-1 p-2 rounded border border-slate-300 text-sm text-slate-900 font-bold" // ★文字色を濃く
                        />
-                       <button type="button" onClick={() => updateDetail(item.key, '')} className="text-slate-300 hover:text-red-500">×</button>
+                       <button type="button" onClick={() => updateDetail(item.key, '')} className="text-slate-400 hover:text-red-500">×</button>
                      </div>
                    ))}
                 </div>
               )}
             </div>
 
-            {/* 3. 休暇・欠勤 (アコーディオン風) */}
+            {/* 3. 休暇・欠勤 */}
             <div className={`bg-white rounded-xl border transition-all ${openCategory === 'leave' ? 'border-green-400 ring-2 ring-green-100' : hasLeave ? 'border-green-300' : 'border-slate-200'}`}>
               <button type="button" onClick={() => setOpenCategory(openCategory === 'leave' ? null : 'leave')} className="w-full flex justify-between items-center p-3 text-left">
                  <div className="flex items-center gap-2">
                   <span className="text-lg">🌴</span>
-                  <span className={`text-xs font-bold ${hasLeave ? 'text-green-600' : 'text-slate-500'}`}>休暇・欠勤</span>
+                  <span className={`text-xs font-bold ${hasLeave ? 'text-green-600' : 'text-slate-600'}`}>休暇・欠勤</span>
                 </div>
                 <span className="text-slate-400 text-xs">{openCategory === 'leave' ? '▲ 閉じる' : hasLeave ? '詳細あり ▼' : '追加する +'}</span>
               </button>
@@ -443,36 +487,32 @@ export default function Home() {
                 <div className="p-3 pt-0 border-t border-slate-100 bg-green-50/30 rounded-b-xl space-y-3">
                    {openCategory === 'leave' && (
                      <div className="mb-2">
-                       <p className="text-[10px] text-slate-400 mb-1">種類を選択:</p>
+                       <p className="text-[10px] text-slate-500 mb-1">種類を選択:</p>
                         <div className="flex flex-wrap gap-2">
-                          {/* 年休ボタン */}
-                          <button type="button" onClick={() => updateDetail('leave_annual', details['leave_annual'] ? '' : '1日')} className={`text-xs px-2 py-1 rounded border ${details['leave_annual'] ? 'bg-green-500 text-white border-green-600' : 'bg-white text-slate-500 border-slate-200'}`}>年休(1日/半日)</button>
-                          {/* その他ボタン */}
+                          <button type="button" onClick={() => updateDetail('leave_annual', details['leave_annual'] ? '' : '1日')} className={`text-xs px-2 py-1 rounded border font-bold ${details['leave_annual'] ? 'bg-green-500 text-white border-green-600' : 'bg-white text-slate-600 border-slate-300'}`}>年休(1日/半日)</button>
                           {LEAVE_ITEMS_TIME.map(item => (
-                             <button key={item.key} type="button" onClick={() => updateDetail(item.key, details[item.key] ? '' : '00:00')} className={`text-xs px-2 py-1 rounded border ${details[item.key] ? 'bg-green-500 text-white border-green-600' : 'bg-white text-slate-500 border-slate-200'}`}>{item.label}</button>
+                             <button key={item.key} type="button" onClick={() => updateDetail(item.key, details[item.key] ? '' : '00:00')} className={`text-xs px-2 py-1 rounded border font-bold ${details[item.key] ? 'bg-green-500 text-white border-green-600' : 'bg-white text-slate-600 border-slate-300'}`}>{item.label}</button>
                           ))}
                         </div>
                      </div>
                    )}
 
-                   {/* 年休の入力(ラジオボタン) */}
                    {details['leave_annual'] !== undefined && (
                      <div className="flex items-center gap-2 animate-fadeIn bg-white p-2 rounded border border-green-200">
                        <span className="text-xs font-bold text-green-700 w-12">年休</span>
                        <div className="flex gap-2">
-                         <label className="flex items-center gap-1 cursor-pointer"><input type="radio" checked={details['leave_annual'] === '1日'} onChange={() => updateDetail('leave_annual', '1日')} className="accent-green-600" /><span className="text-xs">1日</span></label>
-                         <label className="flex items-center gap-1 cursor-pointer"><input type="radio" checked={details['leave_annual'] === '半日'} onChange={() => updateDetail('leave_annual', '半日')} className="accent-green-600" /><span className="text-xs">半日</span></label>
+                         <label className="flex items-center gap-1 cursor-pointer"><input type="radio" checked={details['leave_annual'] === '1日'} onChange={() => updateDetail('leave_annual', '1日')} className="accent-green-600" /><span className="text-xs text-slate-900 font-bold">1日</span></label>
+                         <label className="flex items-center gap-1 cursor-pointer"><input type="radio" checked={details['leave_annual'] === '半日'} onChange={() => updateDetail('leave_annual', '半日')} className="accent-green-600" /><span className="text-xs text-slate-900 font-bold">半日</span></label>
                        </div>
-                       <button type="button" onClick={() => updateDetail('leave_annual', '')} className="ml-auto text-slate-300 hover:text-red-500">×</button>
+                       <button type="button" onClick={() => updateDetail('leave_annual', '')} className="ml-auto text-slate-400 hover:text-red-500">×</button>
                      </div>
                    )}
 
-                   {/* その他の休暇入力(時間) */}
                    {LEAVE_ITEMS_TIME.filter(i => details[i.key] !== undefined).map(item => (
                      <div key={item.key} className="flex items-center gap-2 animate-fadeIn">
-                       <label className="text-xs font-bold text-slate-600 w-24 truncate">{item.label}</label>
-                       <input type="text" placeholder="時間" value={details[item.key] || ''} onChange={(e) => updateDetail(item.key, e.target.value)} className="flex-1 p-2 rounded border border-slate-300 text-sm" />
-                       <button type="button" onClick={() => updateDetail(item.key, '')} className="text-slate-300 hover:text-red-500">×</button>
+                       <label className="text-xs font-bold text-slate-700 w-24 truncate">{item.label}</label>
+                       <input type="text" placeholder="時間" value={details[item.key] || ''} onChange={(e) => updateDetail(item.key, e.target.value)} className="flex-1 p-2 rounded border border-slate-300 text-sm text-slate-900 font-bold" />
+                       <button type="button" onClick={() => updateDetail(item.key, '')} className="text-slate-400 hover:text-red-500">×</button>
                      </div>
                    ))}
                 </div>
@@ -483,11 +523,11 @@ export default function Home() {
 
             {/* 部活動手当入力エリア */}
             <div>
-              <label className="block text-xs font-bold text-slate-500 mb-1">部活動 業務内容</label>
+              <label className="block text-xs font-bold text-slate-600 mb-1">部活動 業務内容</label>
               <select 
                 value={activityId} 
                 onChange={(e) => setActivityId(e.target.value)}
-                className="w-full bg-slate-50 p-3 rounded-lg border border-slate-200 font-bold text-slate-900 text-sm"
+                className="w-full bg-slate-50 p-3 rounded-lg border border-slate-200 font-bold text-slate-900 text-sm" // ★文字色を濃く
               >
                 <option value="">なし (部活なし)</option>
                 {ACTIVITY_TYPES.map(type => (
@@ -500,11 +540,11 @@ export default function Home() {
             <>
                 <div className="grid grid-cols-2 gap-2">
                 <div>
-                    <label className="block text-xs font-bold text-slate-500 mb-1">区分</label>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">区分</label>
                     <select 
                     value={destinationId} 
                     onChange={(e) => setDestinationId(e.target.value)}
-                    className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-slate-900 font-bold"
+                    className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-slate-900 font-bold" // ★文字色を濃く
                     >
                     {DESTINATIONS.map(d => (
                         <option key={d.id} value={d.id}>{d.label}</option>
@@ -512,13 +552,13 @@ export default function Home() {
                     </select>
                 </div>
                 <div>
-                    <label className="block text-xs font-bold text-slate-500 mb-1">詳細 (会場名等)</label>
+                    <label className="block text-xs font-bold text-slate-600 mb-1">詳細 (会場名等)</label>
                     <input 
                     type="text" 
                     placeholder="例: 県体育館"
                     value={destinationDetail} 
                     onChange={(e) => setDestinationDetail(e.target.value)}
-                    className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-slate-900"
+                    className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-slate-900 font-bold" // ★文字色を濃く
                     />
                 </div>
                 </div>
