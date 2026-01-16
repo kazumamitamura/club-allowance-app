@@ -35,7 +35,7 @@ type Allowance = { id: number, user_id: string, date: string, activity_type: str
 type WorkPattern = { id: number, code: string, start_time: string, end_time: string, description: string }
 type DailySchedule = { id: number, user_id: string, date: string, work_pattern_code: string | null, [key: string]: any }
 type SchoolCalendar = { date: string, day_type: string }
-type MasterSchedule = { date: string, work_pattern_code: string } // ★追加
+type MasterSchedule = { date: string, work_pattern_code: string }
 
 const formatDate = (date: Date) => {
   const y = date.getFullYear()
@@ -52,7 +52,7 @@ export default function Home() {
   const [allowances, setAllowances] = useState<Allowance[]>([])
   const [schedules, setSchedules] = useState<DailySchedule[]>([])
   const [schoolCalendar, setSchoolCalendar] = useState<SchoolCalendar[]>([])
-  const [masterSchedules, setMasterSchedules] = useState<MasterSchedule[]>([]) // ★追加: マスタ予定
+  const [masterSchedules, setMasterSchedules] = useState<MasterSchedule[]>([])
   const [workPatterns, setWorkPatterns] = useState<WorkPattern[]>([])
   
   const [selectedDate, setSelectedDate] = useState<Date>(new Date())
@@ -78,7 +78,7 @@ export default function Home() {
       fetchAllowances()
       fetchSchedules() 
       fetchSchoolCalendar()
-      fetchMasterSchedules() // ★追加
+      fetchMasterSchedules()
       
       const { data } = await supabase.from('work_patterns').select('*').order('code')
       if (data) setWorkPatterns(data)
@@ -94,7 +94,6 @@ export default function Home() {
       const type = calData?.day_type || (selectedDate.getDay() % 6 === 0 ? '休日(仮)' : '勤務日(仮)')
       setDayType(type)
       
-      // ★修正: マスタ予定を取得
       const masterSchedule = masterSchedules.find(m => m.date === dateStr)
       const defaultPattern = masterSchedule?.work_pattern_code || (type.includes('休日') || type.includes('週休') ? '' : 'C')
 
@@ -103,7 +102,6 @@ export default function Home() {
         const { data: scheduleData } = await supabase.from('daily_schedules').select('*').eq('user_id', user.id).eq('date', dateStr).single()
         if (scheduleData) {
           setIsRegistered(true)
-          // 登録済みなら個人のデータを優先、なければマスタデータ
           setSelectedPattern(scheduleData.work_pattern_code || defaultPattern) 
           
           const newDetails: any = {}
@@ -113,7 +111,6 @@ export default function Home() {
           setDetails(newDetails)
         } else {
           setIsRegistered(false)
-          // 未登録時はマスタデータを初期値にする
           setSelectedPattern(defaultPattern) 
           setDetails({})
         }
@@ -135,7 +132,7 @@ export default function Home() {
       }
     }
     updateDayInfo()
-  }, [selectedDate, allowances, schoolCalendar, masterSchedules]) // masterSchedules依存を追加
+  }, [selectedDate, allowances, schoolCalendar, masterSchedules])
 
   useEffect(() => {
     const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
@@ -158,7 +155,6 @@ export default function Home() {
     const { data } = await supabase.from('school_calendar').select('*')
     setSchoolCalendar(data || [])
   }
-  // ★追加: マスタデータ取得
   const fetchMasterSchedules = async () => {
     const { data } = await supabase.from('master_schedules').select('*')
     setMasterSchedules(data || [])
@@ -174,7 +170,14 @@ export default function Home() {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
 
-    const scheduleData: any = { user_id: user.id, date: dateStr, work_pattern_code: selectedPattern, leave_annual: details['leave_annual'] || null };
+    // ★修正: user_email も保存する
+    const scheduleData: any = { 
+        user_id: user.id, 
+        user_email: user.email, // 追加
+        date: dateStr, 
+        work_pattern_code: selectedPattern, 
+        leave_annual: details['leave_annual'] || null 
+    };
     [...OVERTIME_ITEMS, ...LEAVE_ITEMS_TIME].forEach(item => { scheduleData[item.key] = details[item.key] || null })
 
     const { error: sErr } = await supabase.from('daily_schedules').upsert(scheduleData, { onConflict: 'user_id, date' })
@@ -192,7 +195,7 @@ export default function Home() {
   }
 
   const handleBulkRegister = async () => {
-    if (!confirm(`${selectedDate.getMonth()+1}月の未入力日を、すべて「デフォルト勤務」として一括登録しますか？\n（マスタデータがあればそれを反映します）`)) return
+    if (!confirm(`${selectedDate.getMonth()+1}月の未入力日を、すべて「デフォルト勤務（C）」として一括登録しますか？`)) return
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
     const year = selectedDate.getFullYear(), month = selectedDate.getMonth(), lastDay = new Date(year, month + 1, 0).getDate()
@@ -200,11 +203,16 @@ export default function Home() {
     
     for (let d = 1; d <= lastDay; d++) {
         const dateStr = formatDate(new Date(year, month, d))
-        // ★修正: マスタにあればそれを使う
         const master = masterSchedules.find(m => m.date === dateStr)
         const pattern = master?.work_pattern_code || 'C'
         
-        updates.push({ user_id: user.id, date: dateStr, work_pattern_code: pattern }) 
+        // ★修正: user_email も保存する
+        updates.push({ 
+            user_id: user.id, 
+            user_email: user.email, // 追加
+            date: dateStr, 
+            work_pattern_code: pattern 
+        }) 
     }
     const { error } = await supabase.from('daily_schedules').upsert(updates, { onConflict: 'user_id, date', ignoreDuplicates: true })
     if (error) alert('エラー: ' + error.message); else { alert('完了しました！'); fetchSchedules(); router.refresh() }
@@ -216,28 +224,21 @@ export default function Home() {
   const handleNextMonth = () => { const d = new Date(selectedDate); d.setMonth(d.getMonth() + 1); setSelectedDate(d) }
   const calculateMonthTotal = () => { const m = selectedDate.getMonth(), y = selectedDate.getFullYear(); return allowances.filter(i => { const d = new Date(i.date); return d.getMonth() === m && d.getFullYear() === y }).reduce((s, i) => s + i.amount, 0) }
 
-  // ★修正: カレンダー表示ロジック（マスタ対応）
   const getTileContent = ({ date, view }: { date: Date; view: string }) => {
     if (view !== 'month') return null
     const dateStr = formatDate(date)
-    
-    // 個人データ -> マスタデータ -> デフォルト(空) の順で優先
     const schedule = schedules.find(s => s.date === dateStr)
-    const master = masterSchedules.find(m => m.date === dateStr) // ★追加
+    const master = masterSchedules.find(m => m.date === dateStr)
     const calData = schoolCalendar.find(c => c.date === dateStr)
     const allowance = allowances.find(i => i.date === dateStr)
 
     let label = ''; let labelColor = 'text-black'
-
     if (schedule?.work_pattern_code) {
-        // 1. 個人の登録があればそれを表示（変更した場合など）
         label = schedule.work_pattern_code
         if (label.includes('休')) labelColor = 'text-red-600'
     } else if (master?.work_pattern_code) {
-        // 2. 個人の登録がなくて、マスタにあればそれを表示（これがやりたかったこと！）
         label = master.work_pattern_code
     } else {
-        // 3. どっちもなければ休日かどうかだけ見る
         if (calData?.day_type?.includes('休')) { label = '休'; labelColor = 'text-red-600' }
     }
 

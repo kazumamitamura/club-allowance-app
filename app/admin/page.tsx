@@ -4,13 +4,11 @@ import { useEffect, useState } from 'react'
 import { createClient } from '@/utils/supabase/client'
 import { useRouter } from 'next/navigation'
 
-// ★管理者メールアドレス
 const ADMIN_EMAILS = [
   'mitamuraka@haguroko.ed.jp',
   'tomonoem@haguroko.ed.jp'
 ].map(email => email.toLowerCase())
 
-// 集計項目定義
 const TIME_ITEMS = [
   { key: 'leave_hourly', label: '時間年休' },
   { key: 'overtime_weekday', label: '平日残業' },
@@ -37,16 +35,13 @@ export default function AdminPage() {
   const [isAdmin, setIsAdmin] = useState(false)
   const [loading, setLoading] = useState(true)
   
-  // データ
   const [selectedMonth, setSelectedMonth] = useState(new Date())
   const [allowances, setAllowances] = useState<any[]>([])
   const [schedules, setSchedules] = useState<any[]>([])
-  const [users, setUsers] = useState<{id: string, email: string}[]>([]) // ユーザー一覧
-  const [selectedUser, setSelectedUser] = useState<string>('all') // 選択中のユーザーID
-  
+  const [users, setUsers] = useState<{id: string, email: string}[]>([]) 
+  const [selectedUser, setSelectedUser] = useState<string>('all') 
   const [viewMode, setViewMode] = useState<'allowance' | 'schedule'>('allowance')
 
-  // 初期化
   useEffect(() => {
     const checkAdmin = async () => {
       const { data: { user } } = await supabase.auth.getUser()
@@ -61,7 +56,6 @@ export default function AdminPage() {
     checkAdmin()
   }, [])
 
-  // 月変更
   const handleMonthChange = (offset: number) => {
     const newDate = new Date(selectedMonth)
     newDate.setMonth(newDate.getMonth() + offset)
@@ -69,7 +63,6 @@ export default function AdminPage() {
     fetchData(newDate)
   }
 
-  // データ取得
   const fetchData = async (date: Date) => {
     setLoading(true)
     const y = date.getFullYear()
@@ -77,25 +70,14 @@ export default function AdminPage() {
     const startDate = `${y}-${String(m).padStart(2, '0')}-01`
     const endDate = `${y}-${String(m).padStart(2, '0')}-31`
 
-    // 1. 手当データ
-    const { data: allowData } = await supabase
-      .from('allowances')
-      .select('*')
-      .gte('date', startDate)
-      .lte('date', endDate)
-      .order('date')
-
-    // 2. 勤務データ
-    const { data: schedData } = await supabase
-      .from('daily_schedules')
-      .select('*')
-      .gte('date', startDate)
-      .lte('date', endDate)
+    const { data: allowData } = await supabase.from('allowances').select('*').gte('date', startDate).lte('date', endDate).order('date')
+    const { data: schedData } = await supabase.from('daily_schedules').select('*').gte('date', startDate).lte('date', endDate)
     
-    // 3. ユーザーリスト生成（データから抽出）
+    // ★修正: ユーザーリストを両方のテーブルから作成
     const userMap = new Map()
-    allowData?.forEach((a: any) => userMap.set(a.user_id, a.user_email))
-    // スケジュールのみの人もいるかもしれないので考慮（本来はusersテーブルがあればベスト）
+    allowData?.forEach((a: any) => { if(a.user_email) userMap.set(a.user_id, a.user_email) })
+    schedData?.forEach((s: any) => { if(s.user_email) userMap.set(s.user_id, s.user_email) }) // schedule側のemailも使用
+
     const userList = Array.from(userMap.entries()).map(([id, email]) => ({ id, email }))
     setUsers(userList)
 
@@ -104,19 +86,16 @@ export default function AdminPage() {
     setLoading(false)
   }
 
-  // --- CSVダウンロード機能 ---
   const downloadCSV = () => {
-    let csvContent = "data:text/csv;charset=utf-8,\uFEFF"; // BOM付き
+    let csvContent = "data:text/csv;charset=utf-8,\uFEFF"; 
     
     if (viewMode === 'allowance') {
-      // 手当CSV
       csvContent += "氏名(Email),支給合計額,回数,内訳\n";
       aggregateAllowances().forEach(row => {
         const details = row.details.map((d: any) => `${d.date.slice(8)}日:${d.activity_type}`).join(' / ');
         csvContent += `${row.name},${row.total},${row.count},"${details}"\n`;
       });
     } else {
-      // 勤務・休暇CSV
       const header = ["氏名", "勤務形態(回数)", "年休(日)", ...TIME_ITEMS.map(t => t.label)].join(",");
       csvContent += header + "\n";
       aggregateSchedules().forEach(row => {
@@ -135,13 +114,10 @@ export default function AdminPage() {
     document.body.removeChild(link);
   }
 
-  // --- 集計ロジック: 手当 ---
   const aggregateAllowances = () => {
     const agg: Record<string, { name: string, total: number, count: number, details: any[] }> = {}
     allowances.forEach(row => {
-      // フィルタリング
       if (selectedUser !== 'all' && row.user_id !== selectedUser) return;
-
       const key = row.user_id
       if (!agg[key]) agg[key] = { name: row.user_email, total: 0, count: 0, details: [] }
       agg[key].total += row.amount
@@ -151,7 +127,6 @@ export default function AdminPage() {
     return Object.values(agg)
   }
 
-  // --- 集計ロジック: 勤務・休暇 ---
   const addTime = (currentMinutes: number, timeStr: string | null) => {
     if (!timeStr || !timeStr.includes(':')) return currentMinutes
     const [h, m] = timeStr.split(':').map(Number)
@@ -173,11 +148,15 @@ export default function AdminPage() {
 
       const key = row.user_id
       if (!agg[key]) {
-        const foundUser = users.find(u => u.id === key)
-        const name = foundUser ? foundUser.email : key.slice(0, 8) + '...'
+        // user_emailがdaily_schedulesにあればそれを使う、なければallowancesから探す
+        let email = row.user_email 
+        if (!email) {
+            const foundUser = users.find(u => u.id === key)
+            email = foundUser ? foundUser.email : key.slice(0, 8) + '...'
+        }
 
         agg[key] = {
-          name: name,
+          name: email,
           patterns: {},
           leave_annual_days: 0,
           time_totals: {},
@@ -213,17 +192,13 @@ export default function AdminPage() {
 
       <div className="max-w-7xl mx-auto p-6">
         
-        {/* コントロールパネル */}
         <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4 bg-white p-4 rounded-xl shadow-sm border border-slate-200">
-          
-          {/* 月選択 */}
           <div className="flex items-center gap-4">
             <button onClick={() => handleMonthChange(-1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold">‹</button>
             <span className="text-xl font-bold w-32 text-center">{selectedMonth.getFullYear()}年 {selectedMonth.getMonth() + 1}月</span>
             <button onClick={() => handleMonthChange(1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold">›</button>
           </div>
 
-          {/* ユーザー絞り込み */}
           <div className="flex items-center gap-2">
             <span className="text-xs font-bold text-slate-500">表示対象:</span>
             <select 
@@ -238,7 +213,6 @@ export default function AdminPage() {
             </select>
           </div>
 
-          {/* タブ切り替え & ダウンロード */}
           <div className="flex gap-4">
              <div className="flex bg-slate-100 p-1 rounded-lg">
                <button onClick={() => setViewMode('allowance')} className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${viewMode === 'allowance' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>💰 手当集計</button>
@@ -254,7 +228,6 @@ export default function AdminPage() {
           <div className="text-center py-10 text-slate-500">読み込み中...</div>
         ) : (
           <div className="bg-white rounded-xl shadow-sm overflow-hidden border border-slate-200">
-            {/* --- モード A: 手当集計 --- */}
             {viewMode === 'allowance' && (
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm">
@@ -292,7 +265,6 @@ export default function AdminPage() {
               </div>
             )}
 
-            {/* --- モード B: 勤務・休暇集計 --- */}
             {viewMode === 'schedule' && (
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm whitespace-nowrap">
