@@ -49,6 +49,9 @@ export default function Home() {
   const supabase = createClient()
   
   const [userEmail, setUserEmail] = useState('')
+  const [userId, setUserId] = useState('') // 自分のID
+  const [isAdmin, setIsAdmin] = useState(false) // 管理者判定
+
   const [allowances, setAllowances] = useState<Allowance[]>([])
   const [schedules, setSchedules] = useState<DailySchedule[]>([])
   const [schoolCalendar, setSchoolCalendar] = useState<SchoolCalendar[]>([])
@@ -69,14 +72,30 @@ export default function Home() {
   const [isAccommodation, setIsAccommodation] = useState(false)
   const [calculatedAmount, setCalculatedAmount] = useState(0)
 
+  // 編集ロック判定 (翌月5日まで)
+  const isLocked = (targetDate: Date) => {
+    if (isAdmin) return false // 管理者はロック無視
+    const now = new Date()
+    // 締め切り：対象月の翌月6日の0時0分（＝5日の終了）
+    const deadline = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 6, 0, 0, 0)
+    return now >= deadline
+  }
+
   useEffect(() => {
     const init = async () => {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) { router.push('/login'); return }
-      setUserEmail(user.email || '')
       
-      fetchAllowances()
-      fetchSchedules() 
+      setUserEmail(user.email || '')
+      setUserId(user.id)
+      
+      // 管理者判定
+      if (ADMIN_EMAILS.includes(user.email?.toLowerCase() || '')) {
+        setIsAdmin(true)
+      }
+
+      // データ取得（自分のデータのみ）
+      fetchData(user.id)
       fetchSchoolCalendar()
       fetchMasterSchedules()
       
@@ -85,6 +104,24 @@ export default function Home() {
     }
     init()
   }, [])
+
+  // 自分のデータだけを取得する関数
+  const fetchData = async (uid: string) => {
+    const { data: allowData } = await supabase.from('allowances').select('*').eq('user_id', uid).order('date', { ascending: false })
+    setAllowances(allowData || [])
+    
+    const { data: schedData } = await supabase.from('daily_schedules').select('*').eq('user_id', uid)
+    setSchedules(schedData || [])
+  }
+
+  const fetchSchoolCalendar = async () => {
+    const { data } = await supabase.from('school_calendar').select('*')
+    setSchoolCalendar(data || [])
+  }
+  const fetchMasterSchedules = async () => {
+    const { data } = await supabase.from('master_schedules').select('*')
+    setMasterSchedules(data || [])
+  }
 
   useEffect(() => {
     const updateDayInfo = async () => {
@@ -97,23 +134,21 @@ export default function Home() {
       const masterSchedule = masterSchedules.find(m => m.date === dateStr)
       const defaultPattern = masterSchedule?.work_pattern_code || (type.includes('休日') || type.includes('週休') ? '' : 'C')
 
-      const { data: { user } } = await supabase.auth.getUser()
-      if (user) {
-        const { data: scheduleData } = await supabase.from('daily_schedules').select('*').eq('user_id', user.id).eq('date', dateStr).single()
-        if (scheduleData) {
-          setIsRegistered(true)
-          setSelectedPattern(scheduleData.work_pattern_code || defaultPattern) 
-          
-          const newDetails: any = {}
-          OVERTIME_ITEMS.forEach(i => { if (scheduleData[i.key]) newDetails[i.key] = scheduleData[i.key] })
-          if (scheduleData.leave_annual) newDetails['leave_annual'] = scheduleData.leave_annual
-          LEAVE_ITEMS_TIME.forEach(i => { if (scheduleData[i.key]) newDetails[i.key] = scheduleData[i.key] })
-          setDetails(newDetails)
-        } else {
-          setIsRegistered(false)
-          setSelectedPattern(defaultPattern) 
-          setDetails({})
-        }
+      // ローカルのstateから検索（毎回fetchしない）
+      const scheduleData = schedules.find(s => s.date === dateStr)
+      
+      if (scheduleData) {
+        setIsRegistered(true)
+        setSelectedPattern(scheduleData.work_pattern_code || defaultPattern)
+        const newDetails: any = {}
+        OVERTIME_ITEMS.forEach(i => { if (scheduleData[i.key]) newDetails[i.key] = scheduleData[i.key] })
+        if (scheduleData.leave_annual) newDetails['leave_annual'] = scheduleData.leave_annual
+        LEAVE_ITEMS_TIME.forEach(i => { if (scheduleData[i.key]) newDetails[i.key] = scheduleData[i.key] })
+        setDetails(newDetails)
+      } else {
+        setIsRegistered(false)
+        setSelectedPattern(defaultPattern)
+        setDetails({})
       }
 
       const allowance = allowances.find(a => a.date === dateStr)
@@ -132,7 +167,7 @@ export default function Home() {
       }
     }
     updateDayInfo()
-  }, [selectedDate, allowances, schoolCalendar, masterSchedules])
+  }, [selectedDate, allowances, schedules, schoolCalendar, masterSchedules]) // schedules依存を追加
 
   useEffect(() => {
     const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
@@ -141,39 +176,26 @@ export default function Home() {
     setCalculatedAmount(amt)
   }, [activityId, isDriving, destinationId, dayType])
 
-  const fetchAllowances = async () => {
-    const { data } = await supabase.from('allowances').select('*').order('date', { ascending: false })
-    setAllowances(data || [])
-  }
-  const fetchSchedules = async () => {
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) return
-    const { data } = await supabase.from('daily_schedules').select('*').eq('user_id', user.id)
-    setSchedules(data || [])
-  }
-  const fetchSchoolCalendar = async () => {
-    const { data } = await supabase.from('school_calendar').select('*')
-    setSchoolCalendar(data || [])
-  }
-  const fetchMasterSchedules = async () => {
-    const { data } = await supabase.from('master_schedules').select('*')
-    setMasterSchedules(data || [])
-  }
-
   const updateDetail = (key: string, value: string) => {
     setDetails((prev: any) => { const next = { ...prev }; if (value === '') delete next[key]; else next[key] = value; return next })
   }
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
+    
+    // ★ロックチェック
+    if (isLocked(selectedDate)) {
+        alert('締め日（翌月5日）を過ぎているため、編集できません。\n修正が必要な場合は管理者へ連絡してください。')
+        return
+    }
+
     const dateStr = formatDate(selectedDate)
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
 
-    // ★修正: user_email も保存する
     const scheduleData: any = { 
         user_id: user.id, 
-        user_email: user.email, // 追加
+        user_email: user.email, 
         date: dateStr, 
         work_pattern_code: selectedPattern, 
         leave_annual: details['leave_annual'] || null 
@@ -186,15 +208,22 @@ export default function Home() {
     if (activityId) {
       await supabase.from('allowances').delete().eq('user_id', user.id).eq('date', dateStr)
       await supabase.from('allowances').insert({ user_id: user.id, user_email: user.email, date: dateStr, activity_type: ACTIVITY_TYPES.find(a => a.id === activityId)?.label || activityId, destination_type: DESTINATIONS.find(d => d.id === destinationId)?.label, destination_detail: destinationDetail, is_driving: isDriving, is_accommodation: isAccommodation, amount: calculatedAmount })
-      fetchAllowances()
     } else {
       await supabase.from('allowances').delete().eq('user_id', user.id).eq('date', dateStr)
-      fetchAllowances()
     }
-    setIsRegistered(true); setOpenCategory(null); fetchSchedules(); alert('保存しました')
+    
+    // データ再取得
+    fetchData(user.id)
+    setIsRegistered(true); setOpenCategory(null); alert('保存しました')
   }
 
   const handleBulkRegister = async () => {
+    // ★ロックチェック（当月の1日がロックされていたら一括登録不可）
+    if (isLocked(new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1))) {
+        alert('締め日（翌月5日）を過ぎているため、一括登録はできません。')
+        return
+    }
+
     if (!confirm(`${selectedDate.getMonth()+1}月の未入力日を、すべて「デフォルト勤務（C）」として一括登録しますか？`)) return
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
@@ -206,19 +235,29 @@ export default function Home() {
         const master = masterSchedules.find(m => m.date === dateStr)
         const pattern = master?.work_pattern_code || 'C'
         
-        // ★修正: user_email も保存する
         updates.push({ 
             user_id: user.id, 
-            user_email: user.email, // 追加
+            user_email: user.email, 
             date: dateStr, 
             work_pattern_code: pattern 
         }) 
     }
     const { error } = await supabase.from('daily_schedules').upsert(updates, { onConflict: 'user_id, date', ignoreDuplicates: true })
-    if (error) alert('エラー: ' + error.message); else { alert('完了しました！'); fetchSchedules(); router.refresh() }
+    if (error) alert('エラー: ' + error.message); else { alert('完了しました！'); fetchData(user.id); router.refresh() }
   }
 
-  const handleDelete = async (id: number) => { if (!window.confirm('削除しますか？')) return; const { error } = await supabase.from('allowances').delete().eq('id', id); if (!error) fetchAllowances() }
+  // ★削除機能（締め日チェック付き）
+  const handleDelete = async (id: number, dateStr: string) => { 
+    if (isLocked(new Date(dateStr))) {
+        alert('締め日（翌月5日）を過ぎているため、削除できません。')
+        return
+    }
+    if (!window.confirm('削除しますか？')) return; 
+    
+    const { error } = await supabase.from('allowances').delete().eq('id', id)
+    if (!error) fetchData(userId) // 自分のIDで再取得
+  }
+  
   const handleLogout = async () => { await supabase.auth.signOut(); router.push('/login') }
   const handlePrevMonth = () => { const d = new Date(selectedDate); d.setMonth(d.getMonth() - 1); setSelectedDate(d) }
   const handleNextMonth = () => { const d = new Date(selectedDate); d.setMonth(d.getMonth() + 1); setSelectedDate(d) }
@@ -250,10 +289,12 @@ export default function Home() {
     )
   }
   
-  const isAdmin = ADMIN_EMAILS.includes(userEmail.toLowerCase())
   const currentPatternDetail = workPatterns.find(p => p.code === selectedPattern)
   const hasOvertime = OVERTIME_ITEMS.some(i => details[i.key])
   const hasLeave = details['leave_annual'] || LEAVE_ITEMS_TIME.some(i => details[i.key])
+  
+  // 現在表示中の日付がロックされているか
+  const isCurrentDateLocked = isLocked(selectedDate)
 
   return (
     <div className="min-h-screen bg-slate-50 pb-20">
@@ -268,7 +309,10 @@ export default function Home() {
             <button onClick={handleNextMonth} className="text-slate-400 p-2 text-xl font-bold">›</button>
           </div>
           <h1 className="text-4xl font-extrabold text-slate-800">¥{calculateMonthTotal().toLocaleString()}</h1>
-          <button onClick={handleBulkRegister} className="mt-3 text-xs font-bold text-blue-600 bg-blue-50 px-4 py-2 rounded-full border border-blue-200 hover:bg-blue-100 shadow-sm">📋 今月の予定を一括登録 (コピペ)</button>
+          
+          {!isLocked(new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1)) && (
+             <button onClick={handleBulkRegister} className="mt-3 text-xs font-bold text-blue-600 bg-blue-50 px-4 py-2 rounded-full border border-blue-200 hover:bg-blue-100 shadow-sm">📋 今月の予定を一括登録</button>
+          )}
         </div>
       </div>
 
@@ -277,13 +321,17 @@ export default function Home() {
           <Calendar onChange={(val) => setSelectedDate(val as Date)} value={selectedDate} activeStartDate={selectedDate} onActiveStartDateChange={({ activeStartDate }) => activeStartDate && setSelectedDate(activeStartDate)} locale="ja-JP" tileContent={getTileContent} className="w-full border-none" />
         </div>
 
-        <div className={`p-6 rounded-3xl shadow-sm border ${isRegistered ? 'bg-green-50 border-green-200' : 'bg-white border-slate-200'}`}>
+        <div className={`p-6 rounded-3xl shadow-sm border ${isCurrentDateLocked ? 'bg-slate-100 border-slate-300' : isRegistered ? 'bg-green-50 border-green-200' : 'bg-white border-slate-200'}`}>
           <div className="flex justify-between items-center mb-4 border-b pb-2">
             <h2 className="font-bold text-slate-700 text-sm">{selectedDate.getMonth() + 1}/{selectedDate.getDate()} の勤務・手当</h2>
-            <span className={`text-xs px-2 py-1 rounded font-bold ${isRegistered ? 'bg-green-200 text-green-800' : 'bg-slate-200 text-slate-500'}`}>{isRegistered ? '登録済' : '未登録'}</span>
+            <div className="flex gap-2">
+                {isCurrentDateLocked && <span className="text-xs px-2 py-1 rounded font-bold bg-red-100 text-red-600">🔒 締切済</span>}
+                <span className={`text-xs px-2 py-1 rounded font-bold ${isRegistered ? 'bg-green-200 text-green-800' : 'bg-slate-200 text-slate-500'}`}>{isRegistered ? '登録済' : '未登録'}</span>
+            </div>
           </div>
 
-          <form onSubmit={handleSave} className="flex flex-col gap-4">
+          <form onSubmit={handleSave} className={`flex flex-col gap-4 ${isCurrentDateLocked ? 'opacity-60 pointer-events-none' : ''}`}>
+            {/* ... (フォームの中身は変更なし) ... */}
             <div className="bg-white p-3 rounded-xl border border-slate-200">
               <label className="block text-xs font-bold text-black mb-1">勤務パターン</label>
               <div className="flex items-center gap-2">
@@ -352,7 +400,13 @@ export default function Home() {
             {allowances.filter(i => { const d = new Date(i.date); return d.getMonth() === selectedDate.getMonth() && d.getFullYear() === selectedDate.getFullYear() }).map((item) => (
             <div key={item.id} className="bg-white p-3 rounded-xl shadow-sm flex justify-between items-center border border-slate-100">
                 <div className="flex items-center gap-3"><span className="font-bold text-slate-700 text-sm">{item.date.split('-')[2]}日</span><span className="text-xs text-slate-500">{item.activity_type}</span></div>
-                <div className="flex items-center gap-2"><span className="font-bold text-slate-700 text-sm">¥{item.amount.toLocaleString()}</span><button onClick={() => handleDelete(item.id)} className="text-slate-300 hover:text-red-500">🗑</button></div>
+                <div className="flex items-center gap-2">
+                    <span className="font-bold text-slate-700 text-sm">¥{item.amount.toLocaleString()}</span>
+                    {/* ★削除ボタン: ロックされていなければ表示 */}
+                    {!isLocked(new Date(item.date)) && (
+                        <button onClick={() => handleDelete(item.id, item.date)} className="text-slate-300 hover:text-red-500">🗑</button>
+                    )}
+                </div>
             </div>
             ))}
         </div>
