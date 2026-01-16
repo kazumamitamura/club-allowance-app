@@ -215,13 +215,11 @@ export default function Home() {
       date: dateStr,
       work_pattern_code: selectedPattern,
       leave_annual: details['leave_annual'] || null,
-    }
+    }; // ★★★ ここにセミコロンを追加してエラーを解消しました ★★★
 
     [...OVERTIME_ITEMS, ...LEAVE_ITEMS_TIME].forEach(item => {
       scheduleData[item.key] = details[item.key] || null
     })
-
-    console.log("Saving schedule data:", scheduleData) // デバッグ用ログ
 
     const { error: scheduleError } = await supabase
       .from('daily_schedules')
