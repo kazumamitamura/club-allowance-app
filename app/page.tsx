@@ -65,6 +65,11 @@ type DailySchedule = {
   [key: string]: any
 }
 
+type SchoolCalendar = {
+  date: string
+  day_type: string
+}
+
 const formatDate = (date: Date) => {
   const y = date.getFullYear()
   const m = ('00' + (date.getMonth() + 1)).slice(-2)
@@ -78,7 +83,8 @@ export default function Home() {
   
   const [userEmail, setUserEmail] = useState('')
   const [allowances, setAllowances] = useState<Allowance[]>([])
-  const [schedules, setSchedules] = useState<DailySchedule[]>([]) // カレンダー表示用
+  const [schedules, setSchedules] = useState<DailySchedule[]>([]) // カレンダー表示用(個人)
+  const [schoolCalendar, setSchoolCalendar] = useState<SchoolCalendar[]>([]) // カレンダー表示用(学校)
   const [workPatterns, setWorkPatterns] = useState<WorkPattern[]>([])
   
   // 入力フォームの状態
@@ -111,7 +117,8 @@ export default function Home() {
       
       // データ取得
       fetchAllowances()
-      fetchSchedules() // カレンダー表示用のスケジュール取得
+      fetchSchedules() 
+      fetchSchoolCalendar() // 学校カレンダー(休日等)も一括取得
       
       const { data: patterns } = await supabase.from('work_patterns').select('*').order('code')
       if (patterns) setWorkPatterns(patterns)
@@ -123,14 +130,9 @@ export default function Home() {
     const updateDayInfo = async () => {
       const dateStr = formatDate(selectedDate)
       
-      // 1. 学校カレンダー取得
-      const { data: calendarData } = await supabase
-        .from('school_calendar')
-        .select('day_type')
-        .eq('date', dateStr)
-        .single()
-      
-      const type = calendarData?.day_type || (selectedDate.getDay() % 6 === 0 ? '休日(仮)' : '勤務日(仮)')
+      // 1. 学校カレンダー判定 (ローカルのstateから検索)
+      const calData = schoolCalendar.find(c => c.date === dateStr)
+      const type = calData?.day_type || (selectedDate.getDay() % 6 === 0 ? '休日(仮)' : '勤務日(仮)')
       setDayType(type)
       
       // 2. 個人の勤務・休暇スケジュールの取得 (単日)
@@ -164,8 +166,12 @@ export default function Home() {
           
         } else {
           setIsRegistered(false)
-          // 未登録時はデフォルト設定（本来は曜日判定などが望ましい）
-          setSelectedPattern('C') 
+          // 未登録時は、休日は何も選択しない、平日は'C'などのデフォルト
+          if (type.includes('休日') || type.includes('週休')) {
+             setSelectedPattern('') // 休日ならデフォルトなし
+          } else {
+             setSelectedPattern('C') 
+          }
           setDetails({})
         }
       }
@@ -188,7 +194,7 @@ export default function Home() {
       }
     }
     updateDayInfo()
-  }, [selectedDate, allowances])
+  }, [selectedDate, allowances, schoolCalendar])
 
   useEffect(() => {
     const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
@@ -205,12 +211,16 @@ export default function Home() {
     setAllowances(data || [])
   }
 
-  // カレンダー表示用のスケジュール全取得
   const fetchSchedules = async () => {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
     const { data } = await supabase.from('daily_schedules').select('*').eq('user_id', user.id)
     setSchedules(data || [])
+  }
+
+  const fetchSchoolCalendar = async () => {
+    const { data } = await supabase.from('school_calendar').select('*')
+    setSchoolCalendar(data || [])
   }
 
   const updateDetail = (key: string, value: string) => {
@@ -307,7 +317,7 @@ export default function Home() {
     if (error) alert('エラー: ' + error.message)
     else {
         alert('一括登録が完了しました！')
-        fetchSchedules() // カレンダー更新
+        fetchSchedules() 
         router.refresh()
     }
   }
@@ -327,29 +337,50 @@ export default function Home() {
     return allowances.filter(i => { const d = new Date(i.date); return d.getMonth() === m && d.getFullYear() === y }).reduce((s, i) => s + i.amount, 0)
   }
   
-  // ★修正: カレンダーに文字(A,B...)を表示するロジック
+  // ★修正: カレンダーのタイル表示ロジック
   const getTileContent = ({ date, view }: { date: Date; view: string }) => {
     if (view !== 'month') return null
     const dateStr = formatDate(date)
     
-    // スケジュールデータを探す
+    // データ検索
     const schedule = schedules.find(s => s.date === dateStr)
-    // 手当データがあるか
-    const hasAllowance = allowances.some(i => i.date === dateStr)
+    const calData = schoolCalendar.find(c => c.date === dateStr)
+    const allowance = allowances.find(i => i.date === dateStr)
+
+    // 表示する記号の決定
+    let label = ''
+    let labelColor = 'text-slate-900' // デフォルト黒
+
+    if (schedule?.work_pattern_code) {
+        // 登録済みの勤務パターンがあればそれを表示
+        label = schedule.work_pattern_code
+        // 「休」の文字が含まれていたら赤くする
+        if (label.includes('休')) labelColor = 'text-red-500'
+    } else {
+        // 未登録の場合、カレンダー情報を参照
+        // 「休日」「週休」などの場合は「休」と表示
+        if (calData?.day_type?.includes('休')) {
+            label = '休'
+            labelColor = 'text-red-500'
+        }
+        // ここに「管理者が事前登録したデフォルトパターン」があればそれを表示するロジックが入る
+        // 現状は未実装なので、平日は表示なし
+    }
 
     return (
-      <div className="flex flex-col items-center justify-center mt-1 h-4">
-        {/* 勤務パターンコードを表示 */}
-        {schedule?.work_pattern_code && (
-           <span className={`text-[10px] font-extrabold leading-none ${
-               schedule.work_pattern_code.includes('休') ? 'text-red-500' : 'text-slate-600'
-           }`}>
-             {schedule.work_pattern_code}
+      <div className="flex flex-col items-center justify-start h-8">
+        {/* 勤務パターン / 休日マーク */}
+        {label && (
+           <span className={`text-[10px] font-extrabold leading-none ${labelColor}`}>
+             {label}
            </span>
         )}
-        {/* 手当がある日は青い点を表示 */}
-        {hasAllowance && (
-            <div className="w-1 h-1 bg-blue-500 rounded-full mt-0.5"></div>
+        
+        {/* 手当金額 (登録されている場合のみ黒字で表示) */}
+        {allowance && (
+            <span className="text-[9px] font-bold text-slate-900 leading-tight -mt-0.5">
+                ¥{allowance.amount.toLocaleString()}
+            </span>
         )}
       </div>
     )
@@ -419,8 +450,9 @@ export default function Home() {
                 <select 
                   value={selectedPattern} 
                   onChange={(e) => setSelectedPattern(e.target.value)}
-                  className="flex-1 bg-white p-2 rounded border border-slate-300 font-bold text-slate-900" // ★文字色を濃く
+                  className="flex-1 bg-white p-2 rounded border border-slate-300 font-bold text-slate-900" 
                 >
+                  <option value="">(未設定)</option>
                   {workPatterns.map(p => (
                     <option key={p.id} value={p.code}>{p.code} ({p.start_time.slice(0,5)}-{p.end_time.slice(0,5)})</option>
                   ))}
@@ -464,7 +496,7 @@ export default function Home() {
                          type="text" placeholder="1:00"
                          value={details[item.key] || ''}
                          onChange={(e) => updateDetail(item.key, e.target.value)}
-                         className="flex-1 p-2 rounded border border-slate-300 text-sm text-slate-900 font-bold" // ★文字色を濃く
+                         className="flex-1 p-2 rounded border border-slate-300 text-sm text-slate-900 font-bold" 
                        />
                        <button type="button" onClick={() => updateDetail(item.key, '')} className="text-slate-400 hover:text-red-500">×</button>
                      </div>
