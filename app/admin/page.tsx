@@ -3,259 +3,302 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/utils/supabase/client'
 import { useRouter } from 'next/navigation'
-import * as XLSX from 'xlsx'
 
-// ★管理者のメールアドレスリスト（指定された2名を設定済み）
+// ★管理者メールアドレス（app/page.tsxと同じもの）
 const ADMIN_EMAILS = [
   'mitamuraka@haguroko.ed.jp',
   'tomonoem@haguroko.ed.jp'
-]
+].map(email => email.toLowerCase())
 
-type Allowance = {
-  id: number
-  user_email: string
-  date: string
-  activity_type: string
-  amount: number
-  destination_type: string
-  destination_detail: string
-  is_driving: boolean
-  is_accommodation: boolean
-}
+// 集計用アイテム定義
+const TIME_ITEMS = [
+  { key: 'leave_hourly', label: '時間年休' },
+  { key: 'overtime_weekday', label: '平日残業' },
+  { key: 'overtime_weekday2', label: '平日2' },
+  { key: 'overtime_late_night', label: '深夜' },
+  { key: 'overtime_holiday', label: '休日' },
+  { key: 'overtime_holiday_late', label: '休日深夜' },
+  { key: 'lateness', label: '遅刻' },
+  { key: 'early_leave', label: '早退' },
+  { key: 'leave_childcare', label: '育児' },
+  { key: 'leave_nursing', label: '介護' },
+  { key: 'leave_special_paid', label: '特休(有)' },
+  { key: 'leave_special_unpaid', label: '特休(無)' },
+  { key: 'leave_duty_exemption', label: '義務免' },
+  { key: 'leave_holiday_shift', label: '休振' },
+  { key: 'leave_comp_day', label: '振代' },
+  { key: 'leave_admin', label: '管休' },
+]
 
 export default function AdminPage() {
   const router = useRouter()
   const supabase = createClient()
   
-  const [allowances, setAllowances] = useState<Allowance[]>([])
-  const [users, setUsers] = useState<string[]>([])
-  const [selectedUser, setSelectedUser] = useState<string>('')
-  
-  // 月選択用の状態
-  const [availableMonths, setAvailableMonths] = useState<string[]>([])
-  const [selectedMonth, setSelectedMonth] = useState<string>('') // "2026-04" のような形式
-
+  const [isAdmin, setIsAdmin] = useState(false)
   const [loading, setLoading] = useState(true)
+  
+  // データ
+  const [selectedMonth, setSelectedMonth] = useState(new Date())
+  const [allowances, setAllowances] = useState<any[]>([])
+  const [schedules, setSchedules] = useState<any[]>([])
+  
+  // 表示モード ('allowance' | 'schedule')
+  const [viewMode, setViewMode] = useState<'allowance' | 'schedule'>('allowance')
 
+  // 初期化
   useEffect(() => {
     const checkAdmin = async () => {
       const { data: { user } } = await supabase.auth.getUser()
-      
-      // 1. ログインしていない、または管理者リストにない場合はトップへ追放
-      if (!user || !user.email || !ADMIN_EMAILS.includes(user.email)) {
-        alert('管理者権限がありません。トップページに戻ります。')
+      if (!user || !ADMIN_EMAILS.includes(user.email?.toLowerCase() || '')) {
+        alert('管理者権限がありません')
         router.push('/')
         return
       }
-      
-      fetchData()
+      setIsAdmin(true)
+      fetchData(selectedMonth)
     }
     checkAdmin()
   }, [])
 
-  const fetchData = async () => {
-    const { data, error } = await supabase
+  // 月変更時に再取得
+  const handleMonthChange = (offset: number) => {
+    const newDate = new Date(selectedMonth)
+    newDate.setMonth(newDate.getMonth() + offset)
+    setSelectedMonth(newDate)
+    fetchData(newDate)
+  }
+
+  const fetchData = async (date: Date) => {
+    setLoading(true)
+    const y = date.getFullYear()
+    const m = date.getMonth() + 1
+    // 月初と月末
+    const startDate = `${y}-${String(m).padStart(2, '0')}-01`
+    const endDate = `${y}-${String(m).padStart(2, '0')}-31` // 簡易的に31日まで
+
+    // 1. 手当データの取得
+    const { data: allowData } = await supabase
       .from('allowances')
       .select('*')
-      .order('date', { ascending: false })
+      .gte('date', startDate)
+      .lte('date', endDate)
+      .order('date')
 
-    if (error) {
-      alert('Error: ' + error.message)
-    } else {
-      const allData = data || []
-      setAllowances(allData)
-
-      // 教員リストを作成
-      const uniqueUsers = Array.from(new Set(allData.map(d => d.user_email).filter(Boolean) as string[]))
-      setUsers(uniqueUsers)
-
-      // データの存在する「年月」のリストを作成（例: ["2026-04", "2026-03"]）
-      const months = Array.from(new Set(allData.map(d => d.date.substring(0, 7))))
-      months.sort((a, b) => b.localeCompare(a)) // 新しい順
-      setAvailableMonths(months)
-      
-      // 最初は最新の月を選択状態にする
-      if (months.length > 0) {
-        setSelectedMonth(months[0])
-      }
-    }
+    // 2. 勤務・休暇データの取得
+    const { data: schedData } = await supabase
+      .from('daily_schedules')
+      .select('*')
+      .gte('date', startDate)
+      .lte('date', endDate)
+    
+    setAllowances(allowData || [])
+    setSchedules(schedData || [])
     setLoading(false)
   }
 
-  // ログアウト処理（追加）
-  const handleLogout = async () => {
-    await supabase.auth.signOut()
-    router.push('/login')
+  // --- 集計ロジック: 手当 ---
+  const aggregateAllowances = () => {
+    const agg: Record<string, { name: string, total: number, count: number, details: any[] }> = {}
+    allowances.forEach(row => {
+      const key = row.user_id
+      if (!agg[key]) agg[key] = { name: row.user_email, total: 0, count: 0, details: [] }
+      agg[key].total += row.amount
+      agg[key].count += 1
+      agg[key].details.push(row)
+    })
+    return Object.values(agg)
   }
 
-  // フィルタリング（教員 AND 選択した月）
-  const filteredData = allowances.filter(item => {
-    const isUserMatch = selectedUser ? item.user_email === selectedUser : false
-    const isMonthMatch = selectedMonth ? item.date.startsWith(selectedMonth) : false
-    return isUserMatch && isMonthMatch
-  })
+  // --- 集計ロジック: 勤務・休暇 ---
+  // 時間文字列 "1:30" を分に変換して足すヘルパー
+  const addTime = (currentMinutes: number, timeStr: string | null) => {
+    if (!timeStr || !timeStr.includes(':')) return currentMinutes
+    const [h, m] = timeStr.split(':').map(Number)
+    return currentMinutes + (h * 60) + m
+  }
+  
+  // 分を "H:MM" に戻すヘルパー
+  const formatMinutes = (minutes: number) => {
+    if (minutes === 0) return '-'
+    const h = Math.floor(minutes / 60)
+    const m = minutes % 60
+    return `${h}:${String(m).padStart(2, '0')}`
+  }
 
-  const totalAmount = filteredData.reduce((sum, item) => sum + item.amount, 0)
-
-  // Excelダウンロード
-  const handleDownloadExcel = () => {
-    if (!selectedUser || filteredData.length === 0) {
-      alert('出力するデータがありません')
-      return
-    }
-
-    const excelData = filteredData.map(item => ({
-      日付: item.date,
-      業務内容: item.activity_type,
-      金額: item.amount,
-      目的地区分: item.destination_type || '-',
-      目的地詳細: item.destination_detail || '-',
-      運転: item.is_driving ? 'あり' : '',
-      宿泊: item.is_accommodation ? 'あり' : '',
-      メールアドレス: item.user_email
-    }))
-
-    const worksheet = XLSX.utils.json_to_sheet(excelData)
-    const workbook = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(workbook, worksheet, "実績一覧")
+  const aggregateSchedules = () => {
+    const agg: Record<string, any> = {}
     
-    // ファイル名に月を入れる (例: mitamuraka..._2026-04_実績.xlsx)
-    XLSX.writeFile(workbook, `${selectedUser}_${selectedMonth}_手当実績.xlsx`)
+    // まずスケジュールからユーザーごとの枠を作る
+    schedules.forEach(row => {
+      const key = row.user_id
+      if (!agg[key]) {
+        // メールアドレスは allowances から逆引き（なければID表示）
+        const foundUser = allowances.find(a => a.user_id === key)
+        const name = foundUser ? foundUser.user_email : key.slice(0, 8) + '...'
+
+        agg[key] = {
+          name: name,
+          patterns: {}, // A: 5, B: 2...
+          leave_annual_days: 0, // 年休(日数)
+          time_totals: {}, // 各時間項目の合計(分)
+        }
+        // 時間集計の初期化
+        TIME_ITEMS.forEach(item => agg[key].time_totals[item.key] = 0)
+      }
+
+      // 1. 勤務パターン集計
+      if (row.work_pattern_code) {
+        const code = row.work_pattern_code
+        agg[key].patterns[code] = (agg[key].patterns[code] || 0) + 1
+      }
+
+      // 2. 年休集計
+      if (row.leave_annual === '1日') agg[key].leave_annual_days += 1
+      if (row.leave_annual === '半日') agg[key].leave_annual_days += 0.5
+
+      // 3. 時間項目集計
+      TIME_ITEMS.forEach(item => {
+        if (row[item.key]) {
+          agg[key].time_totals[item.key] = addTime(agg[key].time_totals[item.key], row[item.key])
+        }
+      })
+    })
+    
+    return Object.values(agg)
   }
 
-  if (loading) return <div className="p-10 text-center text-slate-500">権限確認中 & データ読み込み中...</div>
+  if (!isAdmin) return <div className="p-10 text-center">確認中...</div>
 
   return (
-    <div className="min-h-screen bg-slate-100 p-8">
-      <div className="max-w-6xl mx-auto">
-        <div className="flex justify-between items-center mb-6">
-          <h1 className="text-2xl font-bold text-slate-800">事務担当者用 管理画面</h1>
-          <div className="flex gap-2">
-            {/* ログアウトボタン（追加） */}
-            <button onClick={handleLogout} className="bg-slate-200 text-slate-600 px-4 py-2 rounded hover:bg-slate-300 text-sm font-bold mr-2">
-              ログアウト
-            </button>
-            <button onClick={() => router.push('/admin/calendar')} className="bg-blue-600 text-white px-4 py-2 rounded shadow hover:bg-blue-700 text-sm font-bold">
-              📅 年間予定登録へ
-            </button>
-            <button onClick={() => router.push('/')} className="bg-white border px-4 py-2 rounded text-slate-600 hover:bg-slate-50 text-sm">
-              ← 教員画面へ
-            </button>
+    <div className="min-h-screen bg-slate-50 text-slate-900">
+      {/* ヘッダー */}
+      <div className="bg-slate-800 text-white p-4 shadow-md sticky top-0 z-10 flex justify-between items-center">
+        <h1 className="font-bold text-lg">事務担当者用ダッシュボード</h1>
+        <button onClick={() => router.push('/')} className="text-xs bg-slate-600 px-3 py-1 rounded hover:bg-slate-500">戻る</button>
+      </div>
+
+      <div className="max-w-7xl mx-auto p-6">
+        {/* 月操作 & タブ */}
+        <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
+          <div className="flex items-center gap-4 bg-white p-2 rounded-xl shadow-sm">
+            <button onClick={() => handleMonthChange(-1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold">‹</button>
+            <span className="text-xl font-bold w-32 text-center">{selectedMonth.getFullYear()}年 {selectedMonth.getMonth() + 1}月</span>
+            <button onClick={() => handleMonthChange(1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold">›</button>
+          </div>
+
+          <div className="flex bg-slate-200 p-1 rounded-lg">
+             <button 
+               onClick={() => setViewMode('allowance')}
+               className={`px-4 py-2 rounded-md text-sm font-bold transition-all ${viewMode === 'allowance' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+             >
+               💰 手当集計
+             </button>
+             <button 
+               onClick={() => setViewMode('schedule')}
+               className={`px-4 py-2 rounded-md text-sm font-bold transition-all ${viewMode === 'schedule' ? 'bg-white text-green-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+             >
+               ⏰ 勤務・休暇集計
+             </button>
           </div>
         </div>
 
-        <div className="flex gap-6 items-start">
-          {/* 左：ユーザーリスト */}
-          <div className="w-1/4 bg-white p-4 rounded-lg shadow space-y-6">
+        {loading ? (
+          <div className="text-center py-10 text-slate-500">読み込み中...</div>
+        ) : (
+          <div className="bg-white rounded-xl shadow-sm overflow-hidden border border-slate-200">
             
-            {/* 月選択エリア */}
-            <div>
-              <h2 className="font-bold text-slate-600 mb-2 text-sm">① 対象月を選択</h2>
-              <select 
-                value={selectedMonth} 
-                onChange={(e) => setSelectedMonth(e.target.value)}
-                className="w-full p-2 border rounded bg-slate-50 font-bold text-slate-700"
-              >
-                {availableMonths.map(m => (
-                  <option key={m} value={m}>{m.replace('-', '年 ')}月</option>
-                ))}
-              </select>
-            </div>
-
-            {/* 教員選択エリア */}
-            <div>
-              <h2 className="font-bold text-slate-600 mb-2 text-sm">② 教員を選択</h2>
-              <div className="space-y-1 max-h-[400px] overflow-y-auto">
-                {users.length === 0 ? (
-                    <p className="text-slate-400 text-xs">データなし</p>
-                ) : (
-                    users.map(email => (
-                    <button
-                        key={email}
-                        onClick={() => setSelectedUser(email)}
-                        className={`w-full text-left p-2 rounded text-sm transition ${selectedUser === email ? 'bg-blue-600 text-white font-bold' : 'hover:bg-slate-100 text-slate-700'}`}
-                    >
-                        {email}
-                    </button>
-                    ))
-                )}
-              </div>
-            </div>
-          </div>
-
-          {/* 右：詳細テーブル */}
-          <div className="w-3/4 bg-white p-6 rounded-lg shadow min-h-[500px]">
-            {!selectedUser ? (
-              <div className="text-center text-slate-400 py-20">
-                左のリストから教員を選択してください
-              </div>
-            ) : (
-              <>
-                <div className="flex justify-between items-end mb-6 border-b pb-4">
-                  <div>
-                    <div className="flex items-center gap-3 mb-1">
-                        <span className="bg-blue-100 text-blue-800 text-xs font-bold px-2 py-1 rounded">{selectedMonth}</span>
-                        <p className="text-sm text-slate-500">の支給実績</p>
-                    </div>
-                    <p className="font-bold text-xl text-slate-800">{selectedUser}</p>
-                  </div>
-                  <div className="text-right flex flex-col items-end gap-2">
-                    <div>
-                        <p className="text-xs text-slate-500">合計金額</p>
-                        <p className="font-bold text-4xl text-blue-600">¥{totalAmount.toLocaleString()}</p>
-                    </div>
-                    <button onClick={handleDownloadExcel} className="bg-green-600 hover:bg-green-700 text-white text-xs font-bold py-2 px-4 rounded shadow flex gap-2 items-center transition">
-                      📥 Excelダウンロード
-                    </button>
-                  </div>
-                </div>
-
-                <div className="overflow-x-auto rounded-lg border border-slate-200">
-                  <table className="w-full text-sm text-left text-slate-600">
-                    <thead className="bg-slate-50 text-xs uppercase font-bold sticky top-0 text-slate-500">
-                      <tr>
-                        <th className="px-4 py-3 border-b">日付</th>
-                        <th className="px-4 py-3 border-b">業務内容</th>
-                        <th className="px-4 py-3 border-b">詳細</th>
-                        <th className="px-4 py-3 border-b text-center">運転</th>
-                        <th className="px-4 py-3 border-b text-center">宿泊</th>
-                        <th className="px-4 py-3 border-b text-right">金額</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredData.length === 0 ? (
-                        <tr>
-                            <td colSpan={6} className="text-center py-10 text-slate-400">
-                                この月のデータはありません
-                            </td>
-                        </tr>
-                      ) : (
-                          filteredData.map((item) => (
-                            <tr key={item.id} className="bg-white border-b hover:bg-slate-50 transition">
-                              <td className="px-4 py-3 font-medium whitespace-nowrap text-slate-800">
-                                {item.date.split('-')[1]}/{item.date.split('-')[2]}
-                                <span className="text-slate-400 text-xs ml-1">
-                                    ({new Date(item.date).toLocaleDateString('ja-JP', { weekday: 'short' })})
+            {/* --- モード A: 手当集計 --- */}
+            {viewMode === 'allowance' && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-slate-100 text-slate-600 border-b">
+                    <tr>
+                      <th className="p-4 font-bold">氏名 (ID)</th>
+                      <th className="p-4 font-bold text-right">支給合計額</th>
+                      <th className="p-4 font-bold text-right">回数</th>
+                      <th className="p-4 font-bold">内訳（日付: 内容）</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {aggregateAllowances().length === 0 ? (
+                      <tr><td colSpan={4} className="p-6 text-center text-slate-400">データがありません</td></tr>
+                    ) : (
+                      aggregateAllowances().map((user: any, i) => (
+                        <tr key={i} className="hover:bg-slate-50">
+                          <td className="p-4 font-bold">{user.name}</td>
+                          <td className="p-4 text-right font-bold text-blue-600">¥{user.total.toLocaleString()}</td>
+                          <td className="p-4 text-right">{user.count}回</td>
+                          <td className="p-4 text-xs text-slate-500 max-w-md">
+                            <div className="flex flex-wrap gap-1">
+                              {user.details.map((d: any) => (
+                                <span key={d.id} className="bg-slate-100 px-1.5 py-0.5 rounded border">
+                                  {d.date.slice(8)}日:{d.activity_type}
                                 </span>
-                              </td>
-                              <td className="px-4 py-3 max-w-[180px] truncate" title={item.activity_type}>{item.activity_type}</td>
-                              <td className="px-4 py-3 max-w-[150px] truncate">
-                                <span className="block text-[10px] text-slate-400">{item.destination_type}</span>
-                                <span title={item.destination_detail}>{item.destination_detail}</span>
-                              </td>
-                              <td className="px-4 py-3 text-center">{item.is_driving ? '🚗' : '-'}</td>
-                              <td className="px-4 py-3 text-center">{item.is_accommodation ? '🏨' : '-'}</td>
-                              <td className="px-4 py-3 text-right font-bold text-slate-700">¥{item.amount.toLocaleString()}</td>
-                            </tr>
-                          ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
             )}
+
+            {/* --- モード B: 勤務・休暇集計 --- */}
+            {viewMode === 'schedule' && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm whitespace-nowrap">
+                  <thead className="bg-green-50 text-green-800 border-b border-green-100">
+                    <tr>
+                      <th className="p-3 font-bold sticky left-0 bg-green-50 z-10 border-r">氏名</th>
+                      <th className="p-3 font-bold min-w-[150px]">勤務形態 (回数)</th>
+                      <th className="p-3 font-bold text-center bg-yellow-50/50">年休 (日)</th>
+                      {TIME_ITEMS.map(item => (
+                        <th key={item.key} className="p-3 font-bold text-center border-l border-slate-100">{item.label}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {aggregateSchedules().length === 0 ? (
+                      <tr><td colSpan={20} className="p-6 text-center text-slate-400">データがありません</td></tr>
+                    ) : (
+                      aggregateSchedules().map((user: any, i) => (
+                        <tr key={i} className="hover:bg-slate-50 text-slate-900">
+                          <td className="p-3 font-bold sticky left-0 bg-white border-r z-10">{user.name}</td>
+                          
+                          {/* 勤務形態カウント */}
+                          <td className="p-3">
+                            <div className="flex gap-2">
+                              {Object.entries(user.patterns).map(([code, count]) => (
+                                <span key={code} className="font-mono bg-slate-100 px-1.5 rounded text-xs">
+                                  <strong className={String(code).includes('休') ? 'text-red-500' : ''}>{code as string}</strong>:{count as number}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+
+                          {/* 年休合計日数 */}
+                          <td className="p-3 text-center font-bold bg-yellow-50/30">
+                            {user.leave_annual_days > 0 ? user.leave_annual_days + '日' : '-'}
+                          </td>
+
+                          {/* 各時間項目の合計 */}
+                          {TIME_ITEMS.map(item => (
+                            <td key={item.key} className={`p-3 text-center border-l border-slate-100 ${user.time_totals[item.key] > 0 ? 'font-bold' : 'text-slate-300'}`}>
+                              {formatMinutes(user.time_totals[item.key])}
+                            </td>
+                          ))}
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
           </div>
-        </div>
+        )}
       </div>
     </div>
   )
