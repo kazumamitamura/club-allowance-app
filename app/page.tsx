@@ -3,381 +3,345 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/utils/supabase/client'
 import { useRouter } from 'next/navigation'
-import Calendar from 'react-calendar'
-import 'react-calendar/dist/Calendar.css'
-import { ACTIVITY_TYPES, DESTINATIONS, calculateAmount } from '@/utils/allowanceRules'
+import * as XLSX from 'xlsx'
 
-const ADMIN_EMAILS = ['mitamuraka@haguroko.ed.jp', 'tomonoem@haguroko.ed.jp'].map(e => e.toLowerCase())
+const ADMIN_EMAILS = [
+  'mitamuraka@haguroko.ed.jp',
+  'tomonoem@haguroko.ed.jp'
+].map(email => email.toLowerCase())
 
-// ★修正: 超過勤務系の定数を削除しました
-
-const LEAVE_ITEMS_TIME = [
-  { key: 'leave_hourly', label: '時間年休' },
-  { key: 'leave_childcare', label: '育児休暇' },
-  { key: 'leave_nursing', label: '介護休暇' },
-  { key: 'leave_special_paid', label: 'その他特休(有給)' },
-  { key: 'leave_special_unpaid', label: 'その他特休(無給)' },
+const TIME_ITEMS = [
+  { key: 'leave_hourly', label: '時間休' },
+  { key: 'overtime_weekday', label: '平日残業' },
+  { key: 'overtime_weekday2', label: '平日2' },
+  { key: 'overtime_late_night', label: '深夜' },
+  { key: 'overtime_holiday', label: '休日' },
+  { key: 'overtime_holiday_late', label: '休日深夜' },
+  { key: 'lateness', label: '遅刻' },
+  { key: 'early_leave', label: '早退' },
+  { key: 'leave_childcare', label: '育児' },
+  { key: 'leave_nursing', label: '介護' },
+  { key: 'leave_special_paid', label: '特休(有)' },
+  { key: 'leave_special_unpaid', label: '特休(無)' },
   { key: 'leave_duty_exemption', label: '義務免' },
   { key: 'leave_holiday_shift', label: '休振' },
-  { key: 'leave_comp_day', label: '振休・代休' },
+  { key: 'leave_comp_day', label: '振代' },
   { key: 'leave_admin', label: '管休' },
 ]
 
-type Allowance = { id: number, user_id: string, date: string, activity_type: string, amount: number, destination_type: string, destination_detail: string, is_driving: boolean, is_accommodation: boolean }
-type WorkPattern = { id: number, code: string, start_time: string, end_time: string, description: string }
-type DailySchedule = { id: number, user_id: string, date: string, work_pattern_code: string | null, [key: string]: any }
-type SchoolCalendar = { date: string, day_type: string }
-type MasterSchedule = { date: string, work_pattern_code: string }
-
-const formatDate = (date: Date) => {
-  const y = date.getFullYear()
-  const m = ('00' + (date.getMonth() + 1)).slice(-2)
-  const d = ('00' + date.getDate()).slice(-2)
-  return `${y}-${m}-${d}`
-}
-
-export default function Home() {
+export default function AdminPage() {
   const router = useRouter()
   const supabase = createClient()
   
-  const [userEmail, setUserEmail] = useState('')
-  const [userId, setUserId] = useState('')
   const [isAdmin, setIsAdmin] = useState(false)
-
-  const [allowances, setAllowances] = useState<Allowance[]>([])
-  const [schedules, setSchedules] = useState<DailySchedule[]>([])
-  const [schoolCalendar, setSchoolCalendar] = useState<SchoolCalendar[]>([])
-  const [masterSchedules, setMasterSchedules] = useState<MasterSchedule[]>([])
-  const [workPatterns, setWorkPatterns] = useState<WorkPattern[]>([])
+  const [loading, setLoading] = useState(true)
   
-  const [selectedDate, setSelectedDate] = useState<Date>(new Date())
-  const [dayType, setDayType] = useState<string>('---')
-  const [isRegistered, setIsRegistered] = useState(false)
-  const [selectedPattern, setSelectedPattern] = useState('C')
-  const [details, setDetails] = useState<any>({})
+  const [selectedMonth, setSelectedMonth] = useState(new Date())
+  const [allowances, setAllowances] = useState<any[]>([])
+  const [schedules, setSchedules] = useState<any[]>([])
+  const [aggregatedData, setAggregatedData] = useState<any[]>([])
+  const [userList, setUserList] = useState<{id: string, email: string}[]>([]) 
+  const [selectedUserId, setSelectedUserId] = useState<string>('all')
   
-  // ★修正: overtime の開閉状態管理を削除し、leaveのみに
-  const [openCategory, setOpenCategory] = useState<'leave' | null>(null)
-
-  const [activityId, setActivityId] = useState('')
-  const [destinationId, setDestinationId] = useState('school')
-  const [destinationDetail, setDestinationDetail] = useState('')
-  const [isDriving, setIsDriving] = useState(false)
-  const [isAccommodation, setIsAccommodation] = useState(false)
-  const [calculatedAmount, setCalculatedAmount] = useState(0)
-
-  const isLocked = (targetDate: Date) => {
-    if (isAdmin) return false 
-    const now = new Date()
-    const deadline = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 6, 0, 0, 0)
-    return now >= deadline
-  }
+  const [viewMode, setViewMode] = useState<'allowance' | 'schedule'>('allowance')
+  const [uploading, setUploading] = useState(false)
 
   useEffect(() => {
-    const init = async () => {
+    const checkAdmin = async () => {
       const { data: { user } } = await supabase.auth.getUser()
-      if (!user) { router.push('/login'); return }
-      
-      setUserEmail(user.email || '')
-      setUserId(user.id)
-      
-      if (ADMIN_EMAILS.includes(user.email?.toLowerCase() || '')) {
-        setIsAdmin(true)
+      if (!user || !ADMIN_EMAILS.includes(user.email?.toLowerCase() || '')) {
+        alert('管理者権限がありません')
+        router.push('/')
+        return
       }
-
-      fetchData(user.id)
-      fetchSchoolCalendar()
-      fetchMasterSchedules()
-      
-      const { data } = await supabase.from('work_patterns').select('*').order('code')
-      if (data) setWorkPatterns(data)
+      setIsAdmin(true)
+      fetchData(selectedMonth)
     }
-    init()
+    checkAdmin()
   }, [])
 
-  const fetchData = async (uid: string) => {
-    const { data: allowData } = await supabase.from('allowances').select('*').eq('user_id', uid).order('date', { ascending: false })
+  useEffect(() => {
+    aggregateData()
+  }, [allowances, schedules, selectedUserId])
+
+  const handleMonthChange = (offset: number) => {
+    const newDate = new Date(selectedMonth)
+    newDate.setMonth(newDate.getMonth() + offset)
+    setSelectedMonth(newDate)
+    fetchData(newDate)
+  }
+
+  const fetchData = async (date: Date) => {
+    setLoading(true)
+    const y = date.getFullYear()
+    const m = date.getMonth() + 1
+    const startDate = `${y}-${String(m).padStart(2, '0')}-01`
+    const lastDay = new Date(y, m, 0).getDate()
+    const endDate = `${y}-${String(m).padStart(2, '0')}-${lastDay}`
+
+    const { data: allowData } = await supabase.from('allowances').select('*').gte('date', startDate).lte('date', endDate).order('date')
+    const { data: schedData } = await supabase.from('daily_schedules').select('*').gte('date', startDate).lte('date', endDate).order('date')
+    
     setAllowances(allowData || [])
-    
-    const { data: schedData } = await supabase.from('daily_schedules').select('*').eq('user_id', uid)
     setSchedules(schedData || [])
+
+    const uMap = new Map<string, string>()
+    allowData?.forEach((a: any) => { if(a.user_email) uMap.set(a.user_id, a.user_email) })
+    schedData?.forEach((s: any) => { if(s.user_email && !uMap.has(s.user_id)) uMap.set(s.user_id, s.user_email) })
+    setUserList(Array.from(uMap.entries()).map(([id, email]) => ({ id, email })))
+
+    setLoading(false)
   }
 
-  const fetchSchoolCalendar = async () => {
-    const { data } = await supabase.from('school_calendar').select('*')
-    setSchoolCalendar(data || [])
+  const aggregateData = () => {
+    const targets = selectedUserId === 'all' ? userList : userList.filter(u => u.id === selectedUserId)
+    const result = targets.map(user => {
+        const myAllowances = allowances.filter(a => a.user_id === user.id)
+        const mySchedules = schedules.filter(s => s.user_id === user.id)
+
+        const row: any = {
+            id: user.id,
+            name: user.email,
+            total_amount: myAllowances.reduce((sum, a) => sum + a.amount, 0),
+            allowance_count: myAllowances.length,
+            allowance_details: myAllowances,
+            patterns: {},
+            annual_leave_start: 20,
+            annual_leave_used: 0,
+            annual_leave_remain: 20,
+            time_totals: {},
+            schedule_details: mySchedules
+        }
+
+        TIME_ITEMS.forEach(t => row.time_totals[t.key] = 0)
+
+        mySchedules.forEach(s => {
+            if (s.work_pattern_code) row.patterns[s.work_pattern_code] = (row.patterns[s.work_pattern_code] || 0) + 1
+            if (s.leave_annual === '1日') row.annual_leave_used += 1.0
+            if (s.leave_annual === '半日') row.annual_leave_used += 0.5
+            TIME_ITEMS.forEach(t => {
+                if (s[t.key]) row.time_totals[t.key] = addTime(row.time_totals[t.key], s[t.key])
+            })
+        })
+        row.annual_leave_remain = row.annual_leave_start - row.annual_leave_used
+        return row
+    })
+    setAggregatedData(result)
   }
-  const fetchMasterSchedules = async () => {
-    const { data } = await supabase.from('master_schedules').select('*')
-    setMasterSchedules(data || [])
+
+  const handleDeleteAllowance = async (id: number) => {
+    if (!confirm('削除しますか？')) return
+    await supabase.from('allowances').delete().eq('id', id)
+    fetchData(selectedMonth)
   }
 
-  useEffect(() => {
-    const updateDayInfo = async () => {
-      const dateStr = formatDate(selectedDate)
-      
-      const calData = schoolCalendar.find(c => c.date === dateStr)
-      const type = calData?.day_type || (selectedDate.getDay() % 6 === 0 ? '休日(仮)' : '勤務日(仮)')
-      setDayType(type)
-      
-      const masterSchedule = masterSchedules.find(m => m.date === dateStr)
-      const defaultPattern = masterSchedule?.work_pattern_code || (type.includes('休日') || type.includes('週休') ? '' : 'C')
+  const addTime = (curr: number, timeStr: string | null) => {
+    if (!timeStr || !timeStr.includes(':')) return curr
+    const [h, m] = timeStr.split(':').map(Number)
+    return curr + (h * 60) + m
+  }
+  const formatMinutes = (mins: number) => {
+    if (mins === 0) return ''
+    const h = Math.floor(mins / 60)
+    const m = mins % 60
+    return `${h}:${String(m).padStart(2, '0')}`
+  }
 
-      const scheduleData = schedules.find(s => s.date === dateStr)
-      
-      if (scheduleData) {
-        setIsRegistered(true)
-        setSelectedPattern(scheduleData.work_pattern_code || defaultPattern)
-        const newDetails: any = {}
-        // ★修正: 超過勤務の読み込み処理を削除
-        if (scheduleData.leave_annual) newDetails['leave_annual'] = scheduleData.leave_annual
-        LEAVE_ITEMS_TIME.forEach(i => { if (scheduleData[i.key]) newDetails[i.key] = scheduleData[i.key] })
-        setDetails(newDetails)
-      } else {
-        setIsRegistered(false)
-        setSelectedPattern(defaultPattern)
-        setDetails({})
-      }
+  const downloadExcel = () => {
+    const wb = XLSX.utils.book_new()
+    const y = selectedMonth.getFullYear()
+    const m = selectedMonth.getMonth() + 1
 
-      const allowance = allowances.find(a => a.date === dateStr)
-      if (allowance) {
-        setActivityId(allowance.activity_type === allowance.activity_type ? (ACTIVITY_TYPES.find(t => t.label === allowance.activity_type)?.id || allowance.activity_type) : '')
-        setDestinationId(DESTINATIONS.find(d => d.label === allowance.destination_type)?.id || 'school')
-        setDestinationDetail(allowance.destination_detail || '')
-        setIsDriving(allowance.is_driving)
-        setIsAccommodation(allowance.is_accommodation)
-      } else {
-        setActivityId('')
-        setDestinationId('school')
-        setDestinationDetail('')
-        setIsDriving(false)
-        setIsAccommodation(false)
-      }
+    const summaryData = aggregatedData.map(row => {
+        const timeData: any = {}
+        TIME_ITEMS.forEach(t => timeData[t.label] = formatMinutes(row.time_totals[t.key]) || '-')
+        return {
+            "氏名": row.name,
+            "手当合計": row.total_amount,
+            "手当回数": row.allowance_count,
+            "年休(残)": row.annual_leave_remain,
+            "勤務内訳": Object.entries(row.patterns).map(([k, v]) => `${k}:${v}`).join(' '),
+            ...timeData
+        }
+    })
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryData), "サマリー")
+
+    const detailRows: any[] = []
+    aggregatedData.forEach(user => {
+        detailRows.push({ "日付": `【${user.name}】` }) 
+        const dateMap = new Map<string, any>()
+        user.schedule_details.forEach((s: any) => {
+            if(!dateMap.has(s.date)) dateMap.set(s.date, { date: s.date, type: '勤務', info: s.work_pattern_code || '', amount: 0 })
+            else { const d = dateMap.get(s.date); d.info += ` ${s.work_pattern_code || ''}` }
+        })
+        user.allowance_details.forEach((a: any) => {
+            if(!dateMap.has(a.date)) dateMap.set(a.date, { date: a.date, type: '手当', info: a.activity_type, amount: a.amount })
+            else { const d = dateMap.get(a.date); d.info += ` / ${a.activity_type}`; d.amount += a.amount }
+        })
+        const sortedDates = Array.from(dateMap.keys()).sort()
+        sortedDates.forEach(date => {
+            const d = dateMap.get(date)
+            detailRows.push({ "氏名": user.name, "日付": d.date, "勤務/内容": d.info, "金額": d.amount > 0 ? d.amount : '' })
+        })
+        detailRows.push({})
+    })
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detailRows), "詳細データ")
+    XLSX.writeFile(wb, `勤務手当集計_${y}年${m}月.xlsx`)
+  }
+
+  const handleMasterCsvUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (!confirm('勤務形態マスター（A, B, C...）を登録しますか？\n※既存の日付のデータは上書きされます。')) return
+
+    setUploading(true)
+    const reader = new FileReader()
+    reader.onload = async (evt) => {
+        const text = evt.target?.result as string
+        const lines = text.split(/\r\n|\n/)
+        const updates = []
+        for (const line of lines) {
+            const [dateStr, code] = line.split(',').map(s => s.trim())
+            if (dateStr && code && dateStr.includes('-')) {
+                updates.push({ date: dateStr, work_pattern_code: code })
+            }
+        }
+        if (updates.length === 0) { alert('有効なデータが見つかりませんでした'); setUploading(false); return }
+
+        const { error } = await supabase.from('master_schedules').upsert(updates, { onConflict: 'date' })
+        setUploading(false)
+        if (error) alert('登録エラー: ' + error.message)
+        else { alert(`${updates.length}件のマスターデータを登録しました！`); e.target.value = '' }
     }
-    updateDayInfo()
-  }, [selectedDate, allowances, schedules, schoolCalendar, masterSchedules])
-
-  useEffect(() => {
-    const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
-    if (!activityId) { setCalculatedAmount(0); return }
-    const amt = calculateAmount(activityId, isDriving, destinationId, isWorkDay)
-    setCalculatedAmount(amt)
-  }, [activityId, isDriving, destinationId, dayType])
-
-  const updateDetail = (key: string, value: string) => {
-    setDetails((prev: any) => { const next = { ...prev }; if (value === '') delete next[key]; else next[key] = value; return next })
+    reader.readAsText(file)
   }
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault()
-    
-    if (isLocked(selectedDate)) {
-        alert('締め日（翌月5日）を過ぎているため、編集できません。\n修正が必要な場合は管理者へ連絡してください。')
-        return
-    }
-
-    const dateStr = formatDate(selectedDate)
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) return
-
-    const scheduleData: any = { 
-        user_id: user.id, 
-        user_email: user.email, 
-        date: dateStr, 
-        work_pattern_code: selectedPattern, 
-        leave_annual: details['leave_annual'] || null 
-    };
-    // ★修正: 超過勤務の保存処理を削除（休暇のみ保存）
-    LEAVE_ITEMS_TIME.forEach(item => { scheduleData[item.key] = details[item.key] || null })
-
-    const { error: sErr } = await supabase.from('daily_schedules').upsert(scheduleData, { onConflict: 'user_id, date' })
-    if (sErr) { alert('エラー: ' + sErr.message); return }
-
-    if (activityId) {
-      await supabase.from('allowances').delete().eq('user_id', user.id).eq('date', dateStr)
-      await supabase.from('allowances').insert({ user_id: user.id, user_email: user.email, date: dateStr, activity_type: ACTIVITY_TYPES.find(a => a.id === activityId)?.label || activityId, destination_type: DESTINATIONS.find(d => d.id === destinationId)?.label, destination_detail: destinationDetail, is_driving: isDriving, is_accommodation: isAccommodation, amount: calculatedAmount })
-    } else {
-      await supabase.from('allowances').delete().eq('user_id', user.id).eq('date', dateStr)
-    }
-    
-    fetchData(user.id)
-    setIsRegistered(true); setOpenCategory(null); alert('保存しました')
-  }
-
-  const handleBulkRegister = async () => {
-    if (isLocked(new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1))) {
-        alert('締め日（翌月5日）を過ぎているため、一括登録はできません。')
-        return
-    }
-
-    if (!confirm(`${selectedDate.getMonth()+1}月の未入力日を、すべて「デフォルト勤務」として一括登録しますか？`)) return
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) return
-    const year = selectedDate.getFullYear(), month = selectedDate.getMonth(), lastDay = new Date(year, month + 1, 0).getDate()
-    const updates = []
-    
-    for (let d = 1; d <= lastDay; d++) {
-        const dateStr = formatDate(new Date(year, month, d))
-        const master = masterSchedules.find(m => m.date === dateStr)
-        const pattern = master?.work_pattern_code || 'C'
-        
-        updates.push({ 
-            user_id: user.id, 
-            user_email: user.email, 
-            date: dateStr, 
-            work_pattern_code: pattern 
-        }) 
-    }
-    const { error } = await supabase.from('daily_schedules').upsert(updates, { onConflict: 'user_id, date', ignoreDuplicates: true })
-    if (error) alert('エラー: ' + error.message); else { alert('完了しました！'); fetchData(user.id); router.refresh() }
-  }
-
-  const handleDelete = async (id: number, dateStr: string) => { 
-    if (isLocked(new Date(dateStr))) {
-        alert('締め日（翌月5日）を過ぎているため、削除できません。')
-        return
-    }
-    if (!window.confirm('削除しますか？')) return; 
-    
-    const { error } = await supabase.from('allowances').delete().eq('id', id)
-    if (!error) fetchData(userId)
-  }
-  
-  const handleLogout = async () => { await supabase.auth.signOut(); router.push('/login') }
-  const handlePrevMonth = () => { const d = new Date(selectedDate); d.setMonth(d.getMonth() - 1); setSelectedDate(d) }
-  const handleNextMonth = () => { const d = new Date(selectedDate); d.setMonth(d.getMonth() + 1); setSelectedDate(d) }
-  const calculateMonthTotal = () => { const m = selectedDate.getMonth(), y = selectedDate.getFullYear(); return allowances.filter(i => { const d = new Date(i.date); return d.getMonth() === m && d.getFullYear() === y }).reduce((s, i) => s + i.amount, 0) }
-
-  const getTileContent = ({ date, view }: { date: Date; view: string }) => {
-    if (view !== 'month') return null
-    const dateStr = formatDate(date)
-    const schedule = schedules.find(s => s.date === dateStr)
-    const master = masterSchedules.find(m => m.date === dateStr)
-    const calData = schoolCalendar.find(c => c.date === dateStr)
-    const allowance = allowances.find(i => i.date === dateStr)
-
-    let label = ''; let labelColor = 'text-black'
-    if (schedule?.work_pattern_code) {
-        label = schedule.work_pattern_code
-        if (label.includes('休')) labelColor = 'text-red-600'
-    } else if (master?.work_pattern_code) {
-        label = master.work_pattern_code
-    } else {
-        if (calData?.day_type?.includes('休')) { label = '休'; labelColor = 'text-red-600' }
-    }
-
-    return (
-      <div className="flex flex-col items-center justify-start h-8">
-        {label && <span className={`text-[10px] font-extrabold leading-none ${labelColor}`}>{label}</span>}
-        {allowance && <span className="text-[9px] font-bold text-black leading-tight -mt-0.5">¥{allowance.amount.toLocaleString()}</span>}
-      </div>
-    )
-  }
-  
-  const currentPatternDetail = workPatterns.find(p => p.code === selectedPattern)
-  // ★修正: 超過勤務チェック削除
-  const hasLeave = details['leave_annual'] || LEAVE_ITEMS_TIME.some(i => details[i.key])
-  
-  const isCurrentDateLocked = isLocked(selectedDate)
+  if (!isAdmin) return <div className="p-10 text-center">確認中...</div>
 
   return (
-    <div className="min-h-screen bg-slate-50 pb-20">
-       {isAdmin && <div className="bg-slate-800 text-white text-center py-3 text-sm font-bold shadow-md"><a href="/admin" className="underline hover:text-blue-300 transition">事務担当者ページへ</a></div>}
-
-      <div className="bg-white px-6 py-4 rounded-b-3xl shadow-sm mb-6 sticky top-0 z-10">
-        <button onClick={handleLogout} className="absolute right-4 top-4 text-xs font-bold text-slate-400 bg-slate-100 px-3 py-2 rounded-full">ログアウト</button>
-        <div className="flex flex-col items-center mt-2">
-          <div className="flex items-center gap-4 mb-2">
-            <button onClick={handlePrevMonth} className="text-slate-400 p-2 text-xl font-bold">‹</button>
-            <h2 className="text-sm text-slate-500 font-bold">{selectedDate.getFullYear()}年 {selectedDate.getMonth() + 1}月</h2>
-            <button onClick={handleNextMonth} className="text-slate-400 p-2 text-xl font-bold">›</button>
-          </div>
-          <h1 className="text-4xl font-extrabold text-slate-800">¥{calculateMonthTotal().toLocaleString()}</h1>
-          
-          {!isLocked(new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1)) && (
-             <button onClick={handleBulkRegister} className="mt-3 text-xs font-bold text-blue-600 bg-blue-50 px-4 py-2 rounded-full border border-blue-200 hover:bg-blue-100 shadow-sm">📋 今月の予定を一括登録</button>
-          )}
+    <div className="min-h-screen bg-slate-100 text-slate-900">
+      <div className="bg-slate-800 text-white p-4 shadow-md sticky top-0 z-20 flex justify-between items-center">
+        <h1 className="font-bold text-lg">事務担当者用ダッシュボード</h1>
+        <div className="flex gap-4 items-center">
+            <button onClick={() => router.push('/')} className="text-xs bg-slate-600 px-4 py-2 rounded hover:bg-slate-500 font-bold">アプリに戻る</button>
         </div>
       </div>
 
-      <div className="px-4 max-w-md mx-auto space-y-6">
-        <div className="bg-white p-4 rounded-3xl shadow-sm">
-          <Calendar onChange={(val) => setSelectedDate(val as Date)} value={selectedDate} activeStartDate={selectedDate} onActiveStartDateChange={({ activeStartDate }) => activeStartDate && setSelectedDate(activeStartDate)} locale="ja-JP" tileContent={getTileContent} className="w-full border-none" />
-        </div>
-
-        <div className={`p-6 rounded-3xl shadow-sm border ${isCurrentDateLocked ? 'bg-slate-100 border-slate-300' : isRegistered ? 'bg-green-50 border-green-200' : 'bg-white border-slate-200'}`}>
-          <div className="flex justify-between items-center mb-4 border-b pb-2">
-            <h2 className="font-bold text-slate-700 text-sm">{selectedDate.getMonth() + 1}/{selectedDate.getDate()} の勤務・手当</h2>
-            <div className="flex gap-2">
-                {isCurrentDateLocked && <span className="text-xs px-2 py-1 rounded font-bold bg-red-100 text-red-600">🔒 締切済</span>}
-                <span className={`text-xs px-2 py-1 rounded font-bold ${isRegistered ? 'bg-green-200 text-green-800' : 'bg-slate-200 text-slate-500'}`}>{isRegistered ? '登録済' : '未登録'}</span>
-            </div>
+      <div className="max-w-[95%] mx-auto p-6 space-y-8">
+        
+        <div className="flex flex-col md:flex-row justify-between items-center gap-4 bg-white p-4 rounded-xl shadow border border-slate-200">
+          <div className="flex items-center gap-4">
+            <button onClick={() => handleMonthChange(-1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold text-slate-500">‹</button>
+            <span className="text-2xl font-extrabold text-slate-800 w-40 text-center">{selectedMonth.getFullYear()}年 {selectedMonth.getMonth() + 1}月</span>
+            <button onClick={() => handleMonthChange(1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold text-slate-500">›</button>
           </div>
 
-          <form onSubmit={handleSave} className={`flex flex-col gap-4 ${isCurrentDateLocked ? 'opacity-60 pointer-events-none' : ''}`}>
-            
-            <div className="bg-white p-3 rounded-xl border border-slate-200">
-              <label className="block text-xs font-bold text-black mb-1">勤務パターン</label>
-              <div className="flex items-center gap-2">
-                <select value={selectedPattern} onChange={(e) => setSelectedPattern(e.target.value)} className="flex-1 bg-white p-2 rounded border border-slate-300 font-bold text-black">
-                  <option value="">(未設定)</option>
-                  {workPatterns.map(p => <option key={p.id} value={p.code}>{p.code} ({p.start_time.slice(0,5)}-{p.end_time.slice(0,5)})</option>)}
-                </select>
-                <div className="text-xs text-black font-bold w-1/3 text-right">{currentPatternDetail?.description}</div>
-              </div>
-            </div>
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-bold text-slate-600">表示対象:</span>
+            <select className="p-2 border border-slate-300 rounded font-bold text-sm" value={selectedUserId} onChange={(e) => setSelectedUserId(e.target.value)}>
+                <option value="all">全員を表示</option>
+                {userList.map(u => <option key={u.id} value={u.id}>{u.email}</option>)}
+            </select>
+          </div>
 
-            {/* ★修正: 超過勤務エリアを削除し、休暇のみ表示 */}
-            <div className={`bg-white rounded-xl border transition-all ${openCategory === 'leave' ? 'border-green-400 ring-2 ring-green-100' : hasLeave ? 'border-green-300' : 'border-slate-200'}`}>
-              <button type="button" onClick={() => setOpenCategory(openCategory === 'leave' ? null : 'leave')} className="w-full flex justify-between items-center p-3 text-left">
-                 <div className="flex items-center gap-2"><span className="text-lg">🌴</span><span className={`text-xs font-bold ${hasLeave ? 'text-green-600' : 'text-black'}`}>休暇・欠勤</span></div>
-                <span className="text-slate-400 text-xs">{openCategory === 'leave' ? '▲ 閉じる' : hasLeave ? '詳細あり ▼' : '追加する +'}</span>
-              </button>
-              {(openCategory === 'leave' || hasLeave) && (
-                <div className="p-3 pt-0 border-t border-slate-100 bg-green-50/30 rounded-b-xl space-y-3">
-                   {openCategory === 'leave' && (<div className="mb-2"><div className="flex flex-wrap gap-2"><button type="button" onClick={() => updateDetail('leave_annual', details['leave_annual'] ? '' : '1日')} className={`text-xs px-2 py-1 rounded border font-bold ${details['leave_annual'] ? 'bg-green-500 text-white border-green-600' : 'bg-white text-black border-slate-300'}`}>年休(1日/半日)</button>{LEAVE_ITEMS_TIME.map(item => (<button key={item.key} type="button" onClick={() => updateDetail(item.key, details[item.key] ? '' : '00:00')} className={`text-xs px-2 py-1 rounded border font-bold ${details[item.key] ? 'bg-green-500 text-white border-green-600' : 'bg-white text-black border-slate-300'}`}>{item.label}</button>))}</div></div>)}
-                   {details['leave_annual'] !== undefined && (<div className="flex items-center gap-2 animate-fadeIn bg-white p-2 rounded border border-green-200"><span className="text-xs font-bold text-green-700 w-12">年休</span><div className="flex gap-2"><label className="flex items-center gap-1 cursor-pointer"><input type="radio" checked={details['leave_annual'] === '1日'} onChange={() => updateDetail('leave_annual', '1日')} className="accent-green-600" /><span className="text-xs text-black font-bold">1日</span></label><label className="flex items-center gap-1 cursor-pointer"><input type="radio" checked={details['leave_annual'] === '半日'} onChange={() => updateDetail('leave_annual', '半日')} className="accent-green-600" /><span className="text-xs text-black font-bold">半日</span></label></div><button type="button" onClick={() => updateDetail('leave_annual', '')} className="ml-auto text-slate-400 hover:text-red-500">×</button></div>)}
-                   {LEAVE_ITEMS_TIME.filter(i => details[i.key] !== undefined).map(item => (<div key={item.key} className="flex items-center gap-2 animate-fadeIn"><label className="text-xs font-bold text-black w-24 truncate">{item.label}</label><input type="text" placeholder="時間" value={details[item.key] || ''} onChange={(e) => updateDetail(item.key, e.target.value)} className="flex-1 p-2 rounded border border-slate-300 text-sm text-black font-bold" /><button type="button" onClick={() => updateDetail(item.key, '')} className="text-slate-400 hover:text-red-500">×</button></div>))}
-                </div>
-              )}
-            </div>
+          <div className="flex gap-4 items-center">
+             <div className="flex bg-slate-100 p-1 rounded-lg">
+               <button onClick={() => setViewMode('allowance')} className={`px-6 py-2 rounded-md text-sm font-bold transition-all ${viewMode === 'allowance' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>💰 手当</button>
+               <button onClick={() => setViewMode('schedule')} className={`px-6 py-2 rounded-md text-sm font-bold transition-all ${viewMode === 'schedule' ? 'bg-white text-green-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>⏰ 勤務表</button>
+             </div>
+             <button onClick={downloadExcel} className="bg-green-600 text-white px-6 py-2 rounded-lg text-sm font-bold hover:bg-green-700 shadow flex items-center gap-2">📥 Excel出力</button>
+          </div>
+        </div>
 
-            <hr className="border-slate-100" />
-            <div>
-              <label className="block text-xs font-bold text-black mb-1">部活動 業務内容</label>
-              <select value={activityId} onChange={(e) => setActivityId(e.target.value)} className="w-full bg-slate-50 p-3 rounded-lg border border-slate-200 font-bold text-black text-sm">
-                <option value="">なし (部活なし)</option>
-                {ACTIVITY_TYPES.map(type => <option key={type.id} value={type.id}>{type.label}</option>)}
-              </select>
-            </div>
-            {activityId && (
-            <>
-                <div className="grid grid-cols-2 gap-2">
-                <div><label className="block text-xs font-bold text-black mb-1">区分</label><select value={destinationId} onChange={(e) => setDestinationId(e.target.value)} className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-black font-bold">{DESTINATIONS.map(d => <option key={d.id} value={d.id}>{d.label}</option>)}</select></div>
-                <div><label className="block text-xs font-bold text-black mb-1">詳細 (会場名等)</label><input type="text" placeholder="例: 県体育館" value={destinationDetail} onChange={(e) => setDestinationDetail(e.target.value)} className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-black font-bold" /></div>
+        {loading ? (
+          <div className="text-center py-20 text-slate-500 font-bold animate-pulse">データを集計中...</div>
+        ) : (
+          <div className="bg-white rounded-xl shadow overflow-hidden border border-slate-200">
+            {viewMode === 'allowance' && (
+                <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm">
+                    <thead className="bg-slate-800 text-white">
+                        <tr><th className="p-4 font-bold w-1/4">氏名</th><th className="p-4 font-bold text-right w-1/6">支給合計額</th><th className="p-4 font-bold">内訳（削除可能）</th></tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200">
+                        {aggregatedData.length === 0 && <tr><td colSpan={3} className="p-10 text-center text-slate-400">データがありません</td></tr>}
+                        {aggregatedData.map((user, i) => (
+                        <tr key={i} className="hover:bg-slate-50">
+                            <td className="p-4 font-bold align-top">{user.name}</td>
+                            <td className="p-4 text-right font-extrabold text-blue-700 align-top text-lg">¥{user.total_amount.toLocaleString()}<div className="text-xs text-slate-400 font-normal mt-1">{user.allowance_count}回</div></td>
+                            <td className="p-4">
+                                <div className="flex flex-wrap gap-2">
+                                    {user.allowance_details.map((d: any) => (
+                                    <div key={d.id} className="bg-white border border-slate-200 px-3 py-2 rounded-lg shadow-sm flex items-center gap-3">
+                                        <span className="font-bold text-slate-700">{d.date.slice(8)}日</span><span className="text-slate-600 text-xs">{d.activity_type}</span><span className="font-bold text-blue-600">¥{d.amount.toLocaleString()}</span>
+                                        <button onClick={() => handleDeleteAllowance(d.id)} className="text-slate-300 hover:text-red-500 text-lg leading-none">×</button>
+                                    </div>
+                                    ))}
+                                </div>
+                            </td>
+                        </tr>
+                        ))}
+                    </tbody>
+                    </table>
                 </div>
-                <div className="flex gap-3">
-                <label className={`flex-1 p-3 rounded-lg cursor-pointer border text-center text-xs font-bold ${isDriving ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-400'}`}><input type="checkbox" checked={isDriving} onChange={e => setIsDriving(e.target.checked)} className="hidden" />🚗 運転あり</label>
-                <label className={`flex-1 p-3 rounded-lg cursor-pointer border text-center text-xs font-bold ${isAccommodation ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-400'}`}><input type="checkbox" checked={isAccommodation} onChange={e => setIsAccommodation(e.target.checked)} className="hidden" />🏨 宿泊あり</label>
-                </div>
-                <div className="bg-slate-800 text-white p-4 rounded-xl flex justify-between items-center"><span className="text-xs font-medium">支給予定額</span><span className="text-xl font-bold">¥{calculatedAmount.toLocaleString()}</span></div>
-            </>
             )}
-            <button type="submit" className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 shadow-md">この内容で保存する</button>
-          </form>
-        </div>
+            {viewMode === 'schedule' && (
+                <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm whitespace-nowrap">
+                    <thead className="bg-slate-800 text-white">
+                        <tr>
+                        <th className="p-4 font-bold sticky left-0 bg-slate-800 z-10 border-r border-slate-600">氏名</th>
+                        <th className="p-4 font-bold text-center bg-orange-900 border-l border-slate-600" colSpan={3}>年休管理</th>
+                        <th className="p-4 font-bold border-l border-slate-600">勤務形態</th>
+                        {TIME_ITEMS.map(item => <th key={item.key} className="p-4 font-bold text-center border-l border-slate-600 min-w-[80px]">{item.label}</th>)}
+                        </tr>
+                        <tr className="bg-orange-800 text-xs text-orange-100">
+                            <th className="sticky left-0 bg-slate-800 z-10 border-r border-slate-600"></th>
+                            <th className="p-1 text-center border-l border-orange-700">使用</th><th className="p-1 text-center border-l border-orange-700">残</th><th className="p-1 text-center border-l border-orange-700">時休計</th><th className="border-l border-slate-600"></th>
+                            {TIME_ITEMS.map(i => <th key={i.key} className="border-l border-slate-600"></th>)}
+                        </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200">
+                        {aggregatedData.length === 0 && <tr><td colSpan={20} className="p-10 text-center text-slate-400">データがありません</td></tr>}
+                        {aggregatedData.map((user, i) => (
+                        <tr key={i} className="hover:bg-yellow-50 transition-colors text-slate-900">
+                            <td className="p-4 font-bold sticky left-0 bg-white border-r border-slate-200 z-10">{user.name}</td>
+                            <td className="p-4 text-center font-bold text-orange-700 border-l border-slate-100 bg-orange-50/20">{user.annual_leave_used > 0 ? `-${user.annual_leave_used}` : '-'}</td>
+                            <td className="p-4 text-center border-l border-slate-100 bg-orange-50/20"><span className={`px-2 py-1 rounded font-bold ${user.annual_leave_remain < 5 ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-700'}`}>{user.annual_leave_remain}</span></td>
+                            <td className="p-4 text-center font-bold text-slate-600 border-l border-slate-100 bg-orange-50/20">{formatMinutes(user.time_totals['leave_hourly']) || '-'}</td>
+                            <td className="p-4 text-xs border-l border-slate-100"><div className="flex flex-wrap gap-1">{Object.entries(user.patterns).map(([code, count]) => <span key={code} className="px-1.5 py-0.5 rounded border bg-slate-100 border-slate-200"><b>{code as string}</b>:{count as number}</span>)}</div></td>
+                            {TIME_ITEMS.map(item => <td key={item.key} className={`p-4 text-center border-l border-slate-100 ${user.time_totals[item.key] > 0 ? 'font-bold bg-yellow-50' : 'text-slate-300'}`}>{formatMinutes(user.time_totals[item.key]) || '-'}</td>)}
+                        </tr>
+                        ))}
+                    </tbody>
+                    </table>
+                </div>
+            )}
+          </div>
+        )}
 
-        <div className="space-y-2 pb-10">
-            <h3 className="font-bold text-slate-400 text-xs px-2">{selectedDate.getMonth() + 1}月の手当履歴</h3>
-            {allowances.filter(i => { const d = new Date(i.date); return d.getMonth() === selectedDate.getMonth() && d.getFullYear() === selectedDate.getFullYear() }).map((item) => (
-            <div key={item.id} className="bg-white p-3 rounded-xl shadow-sm flex justify-between items-center border border-slate-100">
-                <div className="flex items-center gap-3"><span className="font-bold text-slate-700 text-sm">{item.date.split('-')[2]}日</span><span className="text-xs text-slate-500">{item.activity_type}</span></div>
-                <div className="flex items-center gap-2"><span className="font-bold text-slate-700 text-sm">¥{item.amount.toLocaleString()}</span>
-                    {!isLocked(new Date(item.date)) && <button onClick={() => handleDelete(item.id, item.date)} className="text-slate-300 hover:text-red-500">🗑</button>}
+        {/* ⚙️ システム管理エリア */}
+        <div className="bg-slate-200 p-6 rounded-xl border border-slate-300 mt-8">
+            <h2 className="font-bold text-slate-700 mb-4 flex items-center gap-2">⚙️ システム管理：勤務形態マスター登録</h2>
+            <div className="bg-white p-6 rounded-lg shadow-sm">
+                <p className="text-sm text-slate-600 mb-4">
+                    全教員に適用される「勤務形態（A, B...）」をCSVファイルで一括登録します。<br/>
+                    <span className="text-red-500 font-bold">※ 管理者が一度行えば、全教員の「カレンダー」に即座に反映されます。</span>
+                </p>
+                
+                <div className="flex items-center gap-4">
+                    <input 
+                        type="file" 
+                        accept=".csv"
+                        onChange={handleMasterCsvUpload}
+                        disabled={uploading}
+                        className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                    />
+                    {uploading && <span className="text-blue-600 font-bold animate-pulse">登録中...</span>}
                 </div>
             </div>
-            ))}
         </div>
+
       </div>
     </div>
   )
