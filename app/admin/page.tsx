@@ -35,14 +35,13 @@ export default function AdminPage() {
   
   const [isAdmin, setIsAdmin] = useState(false)
   const [loading, setLoading] = useState(true)
-  const [downloading, setDownloading] = useState(false) // ダウンロード処理中フラグ
+  const [downloading, setDownloading] = useState(false)
   
   const [selectedMonth, setSelectedMonth] = useState(new Date())
   const [allowances, setAllowances] = useState<any[]>([])
   const [schedules, setSchedules] = useState<any[]>([])
   const [aggregatedData, setAggregatedData] = useState<any[]>([])
   
-  // マスタデータ
   const [userProfiles, setUserProfiles] = useState<Record<string, string>>({})
   const [patternDefs, setPatternDefs] = useState<Record<string, {start:string, end:string}>>({})
   
@@ -78,7 +77,6 @@ export default function AdminPage() {
     fetchData(newDate)
   }
 
-  // その月のデータを取得
   const fetchData = async (date: Date) => {
     setLoading(true)
     const y = date.getFullYear()
@@ -121,7 +119,7 @@ export default function AdminPage() {
 
         const row: any = {
             id: user.id,
-            name: userProfiles[user.email] || user.email, // 名前優先
+            name: userProfiles[user.email] || user.email, 
             email: user.email,
             total_amount: myAllowances.reduce((sum, a) => sum + a.amount, 0),
             allowance_count: myAllowances.length,
@@ -168,181 +166,105 @@ export default function AdminPage() {
     return `${h}:${String(m).padStart(2, '0')}`
   }
 
-  // ==========================================
-  // ① 手当帳票出力
-  // ==========================================
   const downloadAllowanceExcel = () => {
     const wb = XLSX.utils.book_new()
     const y = selectedMonth.getFullYear()
     const m = selectedMonth.getMonth() + 1
-
     const rows: any[] = []
     
-    // 集計データをもとに出力
     aggregatedData.forEach(user => {
-        // 名前行
         rows.push({ "日付": `【${user.name}】` })
-        
-        // 明細行
         if (user.allowance_details.length > 0) {
             const sorted = [...user.allowance_details].sort((a,b) => a.date.localeCompare(b.date))
             sorted.forEach((d: any) => {
                 rows.push({
-                    "氏名": user.name,
-                    "日付": d.date,
-                    "業務内容": d.activity_type,
-                    "区分": d.destination_type || '-',
-                    "詳細": d.destination_detail || '-',
-                    "金額": d.amount
+                    "氏名": user.name, "日付": d.date, "業務内容": d.activity_type, 
+                    "区分": d.destination_type || '-', "詳細": d.destination_detail || '-', "金額": d.amount
                 })
             })
-            // 合計行
             rows.push({ "氏名": "合計", "金額": user.total_amount })
         } else {
             rows.push({ "氏名": "支給なし" })
         }
-        rows.push({}) // 空行
+        rows.push({}) 
     })
-
     const ws = XLSX.utils.json_to_sheet(rows)
     XLSX.utils.book_append_sheet(wb, ws, "手当明細")
     XLSX.writeFile(wb, `特殊勤務手当_${y}年${m}月.xlsx`)
   }
 
-  // ==========================================
-  // ② 月間 勤務表出力
-  // ==========================================
   const downloadMonthlyScheduleExcel = () => {
     const wb = XLSX.utils.book_new()
     const y = selectedMonth.getFullYear()
     const m = selectedMonth.getMonth() + 1
-    
-    // シート作成処理を関数化（後で年間出力でも使うため）
     const ws = createScheduleSheet(y, m, schedules)
-    
     XLSX.utils.book_append_sheet(wb, ws, `${m}月`)
     XLSX.writeFile(wb, `勤務実績表_${y}年${m}月.xlsx`)
   }
 
-  // ==========================================
-  // ③ 年間 勤務表出力 (4月〜翌3月)
-  // ==========================================
   const downloadAnnualScheduleExcel = async () => {
-    if (!confirm('現在表示中の「年度（4月〜翌3月）」の全データを取得して出力します。\nデータ量により時間がかかる場合がありますがよろしいですか？')) return
-    
-    setDownloading(true) // ローディング表示
-    
+    if (!confirm('現在表示中の「年度（4月〜翌3月）」の全データを取得して出力します。\nよろしいですか？')) return
+    setDownloading(true)
     try {
         const wb = XLSX.utils.book_new()
-        
-        // 年度の開始年を決定 (例: 2026年1月なら、2025年度なので 2025)
         const currentY = selectedMonth.getFullYear()
         const currentM = selectedMonth.getMonth() + 1
         const fiscalYear = currentM < 4 ? currentY - 1 : currentY
-
-        // 範囲: 4/1 〜 翌3/31
         const startDate = `${fiscalYear}-04-01`
         const endDate = `${fiscalYear + 1}-03-31`
-
-        // ★年間データを一括取得
-        const { data: annualSchedules } = await supabase
-            .from('daily_schedules')
-            .select('*')
-            .gte('date', startDate)
-            .lte('date', endDate)
-            .order('date')
         
+        const { data: annualSchedules } = await supabase.from('daily_schedules').select('*').gte('date', startDate).lte('date', endDate).order('date')
         const safeSchedules = annualSchedules || []
 
-        // 4月から順に12枚のシートを作成
         for (let i = 0; i < 12; i++) {
-            // シートの年月を計算 (4, 5, ... 12, 1, 2, 3)
-            const targetMonthIndex = 3 + i // 0=Jan, 3=Apr
+            const targetMonthIndex = 3 + i 
             const d = new Date(fiscalYear, targetMonthIndex, 1)
             const sheetYear = d.getFullYear()
             const sheetMonth = d.getMonth() + 1
-
-            // その月のデータだけでシート作成
             const monthlyData = safeSchedules.filter((s: any) => {
                 const sDate = new Date(s.date)
                 return sDate.getFullYear() === sheetYear && (sDate.getMonth() + 1) === sheetMonth
             })
-
             const ws = createScheduleSheet(sheetYear, sheetMonth, monthlyData)
             XLSX.utils.book_append_sheet(wb, ws, `${sheetMonth}月`)
         }
-
         XLSX.writeFile(wb, `勤務実績表_${fiscalYear}年度.xlsx`)
-
-    } catch (e) {
-        alert('出力中にエラーが発生しました')
-        console.error(e)
-    } finally {
-        setDownloading(false)
-    }
+    } catch (e) { alert('出力エラー'); console.error(e) } finally { setDownloading(false) }
   }
 
-  // --- 共通: 勤務表シート作成ロジック ---
   const createScheduleSheet = (year: number, month: number, sourceData: any[]) => {
     const lastDay = new Date(year, month, 0).getDate()
     const allDates: string[] = []
-    for (let d = 1; d <= lastDay; d++) {
-        allDates.push(`${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`)
-    }
-
+    for (let d = 1; d <= lastDay; d++) { allDates.push(`${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`) }
     const rows: any[] = []
-    
-    // 表示対象ユーザー（フィルタリング適用）
     const targets = selectedUserId === 'all' ? userList : userList.filter(u => u.id === selectedUserId)
 
     targets.forEach(u => {
         const name = userProfiles[u.email] || u.email
-        // 個人ヘッダー
         rows.push({ "日付": `■ 勤務実績表: ${name} (${year}年${month}月)` })
-        
-        // テーブルヘッダー
-        const headerRow: any = {
-            "日付": "日付", "氏名": "氏名", "勤務形態": "勤務形態", 
-            "開始時間": "開始時間", "終了時間": "終了時間", "年休": "年休"
-        }
+        const headerRow: any = { "日付": "日付", "氏名": "氏名", "勤務形態": "勤務形態", "開始時間": "開始時間", "終了時間": "終了時間", "年休": "年休" }
         TIME_ITEMS.forEach(t => headerRow[t.label] = t.label)
         rows.push(headerRow)
-
-        // 1日〜月末までループ
         allDates.forEach(dateStr => {
             const sched = sourceData.find((s: any) => s.user_id === u.id && s.date === dateStr)
             const pattern = sched?.work_pattern_code
             const times = pattern ? patternDefs[pattern] : null
-            
             const row: any = {
-                "日付": dateStr,
-                "氏名": name,
-                "勤務形態": pattern || '',
-                "開始時間": times ? times.start.slice(0, 5) : '',
-                "終了時間": times ? times.end.slice(0, 5) : '',
+                "日付": dateStr, "氏名": name, "勤務形態": pattern || '',
+                "開始時間": times ? times.start.slice(0, 5) : '', "終了時間": times ? times.end.slice(0, 5) : '',
                 "年休": sched?.leave_annual || ''
             }
-
-            TIME_ITEMS.forEach(t => {
-                const mins = sched ? sched[t.key] : 0
-                row[t.label] = formatMinutes(mins)
-            })
-            
+            TIME_ITEMS.forEach(t => { const mins = sched ? sched[t.key] : 0; row[t.label] = formatMinutes(mins) })
             rows.push(row)
         })
-        rows.push({}) // 空行
-        rows.push({})
+        rows.push({}); rows.push({})
     })
-
     const ws = XLSX.utils.json_to_sheet(rows, { skipHeader: true })
-    ws['!cols'] = [
-        { wch: 12 }, { wch: 20 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, 
-        ...TIME_ITEMS.map(() => ({ wch: 6 }))
-    ]
+    ws['!cols'] = [{ wch: 12 }, { wch: 20 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, ...TIME_ITEMS.map(() => ({ wch: 6 }))]
     return ws
   }
 
-  // --- CSVアップロード ---
+  // ★修正: GoogleコンタクトCSV対応のアップロード機能
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>, type: 'master' | 'users' | 'patterns') => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -350,45 +272,92 @@ export default function AdminPage() {
 
     setUploading(true)
     const reader = new FileReader()
+    
     reader.onload = async (evt) => {
-        const text = evt.target?.result as string
-        const lines = text.split(/\r\n|\n/).filter(l => l.trim() !== '')
+        const data = new Uint8Array(evt.target?.result as ArrayBuffer)
+        const wb = XLSX.read(data, { type: 'array' })
+        const sheet = wb.Sheets[wb.SheetNames[0]]
+        
+        // 配列として読み込み（ヘッダー処理のため）
+        const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][]
         let count = 0
 
-        for (const line of lines) {
-            const parts = line.split(',').map(s => s.trim())
-            if (parts.length < 2) continue
+        // 空行を除去
+        const cleanRows = rows.filter(row => row.length > 0)
 
-            if (type === 'master') {
-                let dateStr = parts[0].replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/\//g, '-')
-                const code = parts[1]
-                if (dateStr.match(/^\d{4}-\d{1,2}-\d{1,2}$/)) {
-                    const [y, m, d] = dateStr.split('-')
-                    dateStr = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
-                    await supabase.from('master_schedules').upsert({ date: dateStr, work_pattern_code: code }, { onConflict: 'date' })
-                    count++
-                }
-            } else if (type === 'users') {
-                const [email, name] = parts
-                if (email.includes('@')) {
-                    await supabase.from('user_profiles').upsert({ email: email, full_name: name })
-                    count++
-                }
-            } else if (type === 'patterns') {
-                const [code, start, end] = parts
-                if (code && start && end) {
-                    await supabase.from('work_patterns').upsert({ code, start_time: start, end_time: end }, { onConflict: 'code' })
-                    count++
-                }
-            }
+        if (type === 'users') {
+             // ヘッダー行を探す
+             const headerRow = cleanRows[0].map(h => String(h).trim())
+             const emailIdx = headerRow.indexOf('E-mail 1 - Value')
+             const lastIdx = headerRow.indexOf('Last Name')
+             const firstIdx = headerRow.indexOf('First Name')
+
+             if (emailIdx !== -1 && lastIdx !== -1) {
+                 // ★Googleコンタクト形式
+                 for (let i = 1; i < cleanRows.length; i++) {
+                     const row = cleanRows[i]
+                     const email = row[emailIdx]
+                     const lastName = row[lastIdx] || ''
+                     const firstName = row[firstIdx] || ''
+                     // 名前結合（全角スペース除去して結合）
+                     const fullName = `${lastName} ${firstName}`.replace(/　/g, ' ').trim()
+                     
+                     if (email && email.includes('@')) {
+                         await supabase.from('user_profiles').upsert({ email, full_name: fullName })
+                         count++
+                     }
+                 }
+             } else {
+                 // ★通常CSV形式 (Email, 氏名)
+                 for (const row of cleanRows) {
+                    const email = row[0]
+                    const name = row[1]
+                    if (email && String(email).includes('@')) {
+                        await supabase.from('user_profiles').upsert({ email, full_name: name })
+                        count++
+                    }
+                 }
+             }
+
+        } else {
+            // master, patterns は以前と同様のロジック（XLSX経由でより堅牢に）
+             for (const row of cleanRows) {
+                 if (type === 'master') {
+                    // 日付, パターン
+                    let dateStr = String(row[0]).replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/\//g, '-')
+                    const code = row[1]
+                    // エクセルのシリアル値日付に対応
+                    if (!isNaN(Number(row[0])) && Number(row[0]) > 40000) {
+                        const d = new Date((Number(row[0]) - 25569) * 86400 * 1000)
+                        dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+                    }
+
+                    if (dateStr.match(/^\d{4}-\d{1,2}-\d{1,2}$/)) {
+                        const [y, m, d] = dateStr.split('-')
+                        const fmtDate = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
+                        await supabase.from('master_schedules').upsert({ date: fmtDate, work_pattern_code: code }, { onConflict: 'date' })
+                        count++
+                    }
+                 } else if (type === 'patterns') {
+                    // コード, 開始, 終了
+                    const code = row[0]
+                    const start = row[1]
+                    const end = row[2]
+                    if (code && start && end) {
+                        await supabase.from('work_patterns').upsert({ code, start_time: start, end_time: end }, { onConflict: 'code' })
+                        count++
+                    }
+                 }
+             }
         }
+
         alert(`${count}件のデータを登録しました！`)
         setUploading(false)
         e.target.value = ''
-        fetchMasters() 
+        fetchMasters()
         fetchData(selectedMonth)
     }
-    reader.readAsText(file)
+    reader.readAsArrayBuffer(file)
   }
 
   if (!isAdmin) return <div className="p-10 text-center">確認中...</div>
@@ -406,9 +375,9 @@ export default function AdminPage() {
         
         <div className="flex flex-col md:flex-row justify-between items-center gap-4 bg-white p-4 rounded-xl shadow border border-slate-200">
           <div className="flex items-center gap-4">
-            <button onClick={() => handleMonthChange(-1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold text-slate-500">‹</button>
+            <button onClick={() => handleMonthChange(-1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold">‹</button>
             <span className="text-2xl font-extrabold text-slate-800 w-40 text-center">{selectedMonth.getFullYear()}年 {selectedMonth.getMonth() + 1}月</span>
-            <button onClick={() => handleMonthChange(1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold text-slate-500">›</button>
+            <button onClick={() => handleMonthChange(1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold">›</button>
           </div>
 
           <div className="flex items-center gap-2">
@@ -423,32 +392,20 @@ export default function AdminPage() {
             </select>
           </div>
 
-          {/* 右上の表示切替 */}
           <div className="flex gap-2">
-             <button onClick={() => setViewMode('allowance')} className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${viewMode === 'allowance' ? 'bg-blue-600 text-white shadow' : 'bg-slate-100 text-slate-500'}`}>💰 手当画面</button>
-             <button onClick={() => setViewMode('schedule')} className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${viewMode === 'schedule' ? 'bg-green-600 text-white shadow' : 'bg-slate-100 text-slate-500'}`}>⏰ 勤務画面</button>
+             <button onClick={() => setViewMode('allowance')} className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${viewMode === 'allowance' ? 'bg-blue-600 text-white shadow' : 'bg-slate-100 text-slate-500'}`}>💰 表示:手当</button>
+             <button onClick={() => setViewMode('schedule')} className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${viewMode === 'schedule' ? 'bg-green-600 text-white shadow' : 'bg-slate-100 text-slate-500'}`}>⏰ 表示:勤務</button>
           </div>
         </div>
 
-        {/* 出力ボタンエリア（独立させて目立たせる） */}
         <div className="bg-white p-4 rounded-xl shadow border border-slate-200 flex flex-wrap gap-4 items-center justify-end">
             <span className="text-sm font-bold text-slate-500 mr-auto">帳票出力メニュー:</span>
-            
-            <button onClick={downloadAllowanceExcel} className="bg-blue-600 text-white px-5 py-2 rounded-lg text-sm font-bold hover:bg-blue-700 shadow flex items-center gap-2">
-                💰 手当帳票 (.xlsx)
-            </button>
-            
+            <button onClick={downloadAllowanceExcel} className="bg-blue-600 text-white px-5 py-2 rounded-lg text-sm font-bold hover:bg-blue-700 shadow flex items-center gap-2">💰 手当帳票 (.xlsx)</button>
             <div className="h-8 w-px bg-slate-300 mx-2"></div>
-
-            <button onClick={downloadMonthlyScheduleExcel} className="bg-green-600 text-white px-5 py-2 rounded-lg text-sm font-bold hover:bg-green-700 shadow flex items-center gap-2">
-                📅 月間 勤務表 (.xlsx)
-            </button>
-            <button onClick={downloadAnnualScheduleExcel} disabled={downloading} className="bg-green-800 text-white px-5 py-2 rounded-lg text-sm font-bold hover:bg-green-900 shadow flex items-center gap-2">
-                {downloading ? '⏳ 出力中...' : '📅 年間 勤務表 (4月-3月) (.xlsx)'}
-            </button>
+            <button onClick={downloadMonthlyScheduleExcel} className="bg-green-600 text-white px-5 py-2 rounded-lg text-sm font-bold hover:bg-green-700 shadow flex items-center gap-2">📅 月間 勤務表 (.xlsx)</button>
+            <button onClick={downloadAnnualScheduleExcel} disabled={downloading} className="bg-green-800 text-white px-5 py-2 rounded-lg text-sm font-bold hover:bg-green-900 shadow flex items-center gap-2">{downloading ? '⏳ 出力中...' : '📅 年間 勤務表 (4月-3月)'}</button>
         </div>
 
-        {/* データ表示テーブル */}
         {loading ? (
           <div className="text-center py-20 text-slate-500 font-bold animate-pulse">データを集計中...</div>
         ) : (
@@ -514,7 +471,6 @@ export default function AdminPage() {
           </div>
         )}
 
-        {/* ⚙️ システム管理エリア */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
                 <h3 className="font-bold text-slate-700 mb-2">📅 ① カレンダー予定登録</h3>
@@ -528,7 +484,7 @@ export default function AdminPage() {
             </div>
             <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
                 <h3 className="font-bold text-slate-700 mb-2">🧑‍🏫 ③ 氏名マスタ登録</h3>
-                <p className="text-xs text-slate-500 mb-2">メアドと氏名を紐付け（Email, 氏名）</p>
+                <p className="text-xs text-slate-500 mb-2">GoogleコンタクトCSV または (Email,氏名)</p>
                 <input type="file" accept=".csv" onChange={(e) => handleUpload(e, 'users')} disabled={uploading} className="text-xs w-full"/>
             </div>
         </div>
