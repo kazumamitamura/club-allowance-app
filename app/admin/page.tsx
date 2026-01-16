@@ -189,29 +189,57 @@ export default function AdminPage() {
     XLSX.writeFile(wb, `勤務手当集計_${y}年${m}月.xlsx`)
   }
 
+  // --- ★修正: 柔軟なCSV読み込み ---
   const handleMasterCsvUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
+
     if (!confirm('勤務形態マスター（A, B, C...）を登録しますか？\n※既存の日付のデータは上書きされます。')) return
 
     setUploading(true)
     const reader = new FileReader()
+    
     reader.onload = async (evt) => {
         const text = evt.target?.result as string
         const lines = text.split(/\r\n|\n/)
         const updates = []
+
         for (const line of lines) {
-            const [dateStr, code] = line.split(',').map(s => s.trim())
-            if (dateStr && code && dateStr.includes('-')) {
-                updates.push({ date: dateStr, work_pattern_code: code })
+            // カンマ区切りで分割
+            const parts = line.split(',')
+            if (parts.length < 2) continue
+
+            // データ整形 (全角数字対応、余計な空白削除)
+            let dateStr = parts[0].trim().replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
+            const code = parts[1].trim()
+
+            // 日付形式の統一 (2025/1/1 -> 2025-01-01)
+            dateStr = dateStr.replace(/\//g, '-') 
+
+            // YYYY-MM-DD 形式かチェック (簡易)
+            if (dateStr.match(/^\d{4}-\d{1,2}-\d{1,2}$/) && code) {
+                // 月や日が1桁の場合、0埋めする (2025-4-1 -> 2025-04-01)
+                const [y, m, d] = dateStr.split('-')
+                const formattedDate = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
+                
+                updates.push({ date: formattedDate, work_pattern_code: code })
             }
         }
-        if (updates.length === 0) { alert('有効なデータが見つかりませんでした'); setUploading(false); return }
+
+        if (updates.length === 0) {
+            alert('有効なデータが見つかりませんでした。\nCSVの日付形式を確認してください (例: 2025/04/01, A)')
+            setUploading(false)
+            return
+        }
 
         const { error } = await supabase.from('master_schedules').upsert(updates, { onConflict: 'date' })
+        
         setUploading(false)
         if (error) alert('登録エラー: ' + error.message)
-        else { alert(`${updates.length}件のマスターデータを登録しました！`); e.target.value = '' }
+        else {
+            alert(`${updates.length}件のマスターデータを登録しました！`)
+            e.target.value = ''
+        }
     }
     reader.readAsText(file)
   }
@@ -320,7 +348,6 @@ export default function AdminPage() {
           </div>
         )}
 
-        {/* ⚙️ システム管理エリア */}
         <div className="bg-slate-200 p-6 rounded-xl border border-slate-300 mt-8">
             <h2 className="font-bold text-slate-700 mb-4 flex items-center gap-2">⚙️ システム管理：勤務形態マスター登録</h2>
             <div className="bg-white p-6 rounded-lg shadow-sm">
@@ -338,6 +365,12 @@ export default function AdminPage() {
                         className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
                     />
                     {uploading && <span className="text-blue-600 font-bold animate-pulse">登録中...</span>}
+                </div>
+                <div className="mt-4 text-xs text-slate-400 bg-slate-50 p-3 rounded">
+                    <strong>CSV例 (ヘッダーがあってもOK):</strong><br/>
+                    日付, 勤務形態<br/>
+                    2025/04/01, A<br/>
+                    2025/04/02, B
                 </div>
             </div>
         </div>
