@@ -7,12 +7,13 @@ import Calendar from 'react-calendar'
 import 'react-calendar/dist/Calendar.css'
 import { ACTIVITY_TYPES, DESTINATIONS, calculateAmount } from '@/utils/allowanceRules'
 
-// ★管理者のメールアドレスリスト（重要：すべて小文字で入力してください）
+// ★管理者のメールアドレスリスト（すべて小文字で入力）
 const ADMIN_EMAILS = [
   'mitamuraka@haguroko.ed.jp',
   'tomonoem@haguroko.ed.jp'
-].map(email => email.toLowerCase()) // 念のため自動で小文字に変換
+].map(email => email.toLowerCase())
 
+// --- 型定義 ---
 type Allowance = {
   id: number
   user_id: string
@@ -26,6 +27,15 @@ type Allowance = {
   is_accommodation: boolean
 }
 
+type WorkPattern = {
+  id: number
+  code: string        // A, B, C...
+  start_time: string
+  end_time: string
+  description: string
+}
+
+// 日付を YYYY-MM-DD 形式に変換
 const formatDate = (date: Date) => {
   const y = date.getFullYear()
   const m = ('00' + (date.getMonth() + 1)).slice(-2)
@@ -36,8 +46,15 @@ const formatDate = (date: Date) => {
 export default function Home() {
   const router = useRouter()
   const supabase = createClient()
+  
+  // --- State管理 ---
+  const [userEmail, setUserEmail] = useState('')
   const [allowances, setAllowances] = useState<Allowance[]>([])
   
+  // 勤務パターン関連
+  const [workPatterns, setWorkPatterns] = useState<WorkPattern[]>([])
+  const [selectedPattern, setSelectedPattern] = useState('C') // デフォルトC(定時)
+
   // 入力フォームの状態
   const [selectedDate, setSelectedDate] = useState<Date>(new Date())
   const [dayType, setDayType] = useState<string>('---')
@@ -48,34 +65,68 @@ export default function Home() {
   const [isAccommodation, setIsAccommodation] = useState(false)
   const [calculatedAmount, setCalculatedAmount] = useState(0)
 
-  const [userEmail, setUserEmail] = useState('')
-
+  // --- 初期化処理 ---
   useEffect(() => {
     const init = async () => {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) { router.push('/login'); return }
       setUserEmail(user.email || '')
+      
+      // 手当履歴の取得
       fetchAllowances()
+      
+      // 勤務パターンマスタ(A,B,C...)の取得
+      const { data: patterns } = await supabase
+        .from('work_patterns')
+        .select('*')
+        .order('code')
+      if (patterns) setWorkPatterns(patterns)
     }
     init()
   }, [])
 
+  // --- 日付変更時の処理（勤務情報と予定の取得） ---
   useEffect(() => {
     const updateDayInfo = async () => {
       const dateStr = formatDate(selectedDate)
-      const { data } = await supabase
+      
+      // 1. 学校カレンダー（休日判定）の取得
+      const { data: calendarData } = await supabase
         .from('school_calendar')
         .select('day_type')
         .eq('date', dateStr)
         .single()
       
-      const type = data?.day_type || (selectedDate.getDay() % 6 === 0 ? '休日(仮)' : '勤務日(仮)')
+      const type = calendarData?.day_type || (selectedDate.getDay() % 6 === 0 ? '休日(仮)' : '勤務日(仮)')
       setDayType(type)
+      
+      // 2. その日の個人の勤務スケジュールを取得
+      // （管理者がCSVで入れたデータや、過去に自分で保存したデータがあれば反映）
+      const { data: { user } } = await supabase.auth.getUser()
+      if (user) {
+        const { data: scheduleData } = await supabase
+          .from('daily_schedules')
+          .select('work_pattern_code')
+          .eq('user_id', user.id)
+          .eq('date', dateStr)
+          .single()
+        
+        if (scheduleData) {
+          // 登録済みならそのパターンを表示
+          setSelectedPattern(scheduleData.work_pattern_code)
+        } else {
+          // 未登録ならデフォルト（C:定時）またはカレンダーから推測
+          setSelectedPattern('C')
+        }
+      }
+
+      // フォームのリセット
       setActivityId('') 
     }
     updateDayInfo()
   }, [selectedDate])
 
+  // --- 金額の自動計算 ---
   useEffect(() => {
     const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
     if (!activityId) {
@@ -86,20 +137,20 @@ export default function Home() {
     setCalculatedAmount(amt)
   }, [activityId, isDriving, destinationId, dayType])
 
+  // --- データの読み込み ---
   const fetchAllowances = async () => {
     const { data } = await supabase.from('allowances').select('*').order('date', { ascending: false })
     setAllowances(data || [])
   }
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut()
-    router.push('/login')
-  }
-
+  // --- 登録処理（勤務パターン + 手当） ---
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault()
+    
+    // 業務内容が未選択でも、勤務パターンだけ保存したい場合もあるためチェックを緩和しても良いが、
+    // 現状は「手当登録ついでに勤務も登録」というフローにする
     if (!activityId) {
-      alert('業務内容を選択してください')
+      alert('業務内容を選択してください\n（勤務パターンのみ変更する場合は、開発者に相談してください）')
       return
     }
     
@@ -107,7 +158,22 @@ export default function Home() {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
 
-    const { error } = await supabase.from('allowances').insert({
+    // 1. 勤務パターンの保存 (daily_schedulesへUpsert)
+    // これにより、管理者が入れた予定を自分で上書き調整できる
+    const { error: scheduleError } = await supabase
+      .from('daily_schedules')
+      .upsert({
+        user_id: user.id,
+        date: dateStr,
+        work_pattern_code: selectedPattern
+      }, { onConflict: 'user_id, date' })
+
+    if (scheduleError) {
+      console.error('勤務パターンの保存失敗:', scheduleError)
+    }
+
+    // 2. 手当の保存 (allowancesへInsert)
+    const { error: allowanceError } = await supabase.from('allowances').insert({
       user_id: user.id,
       user_email: user.email,
       date: dateStr,
@@ -119,8 +185,12 @@ export default function Home() {
       amount: calculatedAmount,
     })
 
-    if (error) alert('エラー: ' + error.message)
-    else fetchAllowances()
+    if (allowanceError) {
+      alert('手当の保存エラー: ' + allowanceError.message)
+    } else {
+      fetchAllowances() // 履歴リストを更新
+      alert('登録しました！\n（勤務パターンも更新されました）')
+    }
   }
 
   const handleDelete = async (id: number) => {
@@ -129,6 +199,12 @@ export default function Home() {
     if (!error) fetchAllowances()
   }
 
+  const handleLogout = async () => {
+    await supabase.auth.signOut()
+    router.push('/login')
+  }
+
+  // 月の切り替え
   const handlePrevMonth = () => {
     const newDate = new Date(selectedDate)
     newDate.setMonth(selectedDate.getMonth() - 1)
@@ -140,6 +216,7 @@ export default function Home() {
     setSelectedDate(newDate)
   }
 
+  // 合計金額計算
   const calculateMonthTotal = () => {
     const targetMonth = selectedDate.getMonth()
     const targetYear = selectedDate.getFullYear()
@@ -151,6 +228,7 @@ export default function Home() {
       .reduce((sum, item) => sum + item.amount, 0)
   }
 
+  // カレンダーの「・」マーク表示
   const getTileContent = ({ date, view }: { date: Date; view: string }) => {
     if (view !== 'month') return null
     const dateStr = formatDate(date)
@@ -158,13 +236,16 @@ export default function Home() {
     return hasData ? <div className="flex justify-center mt-1"><div className="w-1.5 h-1.5 bg-blue-500 rounded-full"></div></div> : null
   }
 
-  // ★重要：大文字小文字を無視して比較する
+  // 管理者判定
   const isAdmin = ADMIN_EMAILS.includes(userEmail.toLowerCase())
   const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
 
+  // 選択中の勤務パターンの詳細を取得
+  const currentPatternDetail = workPatterns.find(p => p.code === selectedPattern)
+
   return (
     <div className="min-h-screen bg-slate-50 pb-20">
-       {/* ★管理者の場合のみ、ここに黒いバーが表示されます */}
+       {/* 管理者バー */}
        {isAdmin && (
         <div className="bg-slate-800 text-white text-center py-3 text-sm font-bold shadow-md">
           <a href="/admin" className="underline hover:text-blue-300 transition">
@@ -173,7 +254,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* ヘッダーエリア */}
+      {/* ヘッダー */}
       <div className="bg-white px-6 py-4 rounded-b-3xl shadow-sm mb-6 sticky top-0 z-10 relative">
         <button 
           onClick={handleLogout} 
@@ -195,6 +276,12 @@ export default function Home() {
             ¥{calculateMonthTotal().toLocaleString()}
           </h1>
           <p className="text-xs text-slate-300 mt-1">{userEmail}</p>
+          
+          <div className="mt-3">
+             <a href="/records" className="text-xs font-bold text-blue-500 bg-blue-50 px-3 py-1 rounded-full hover:bg-blue-100">
+               🏆 大会記録システムへ
+             </a>
+          </div>
         </div>
       </div>
 
@@ -226,9 +313,42 @@ export default function Home() {
 
           <form onSubmit={handleAdd} className="flex flex-col gap-4">
             
+            {/* ★ここに追加：勤務パターンの選択 */}
+            <div className="bg-blue-50 p-3 rounded-xl border border-blue-100">
+              <label className="block text-xs font-bold text-blue-600 mb-1">本日の勤務パターン</label>
+              <div className="flex items-center gap-2">
+                <div className="relative flex-1">
+                  <select 
+                    value={selectedPattern} 
+                    onChange={(e) => setSelectedPattern(e.target.value)}
+                    className="w-full bg-white p-2 pl-3 pr-8 rounded-lg border border-blue-200 font-bold text-slate-700 appearance-none focus:ring-2 focus:ring-blue-400 outline-none"
+                  >
+                    {workPatterns.map(p => (
+                      <option key={p.id} value={p.code}>
+                        {p.code} 勤務
+                      </option>
+                    ))}
+                  </select>
+                  <div className="absolute right-3 top-3 pointer-events-none text-slate-400">▼</div>
+                </div>
+                
+                {/* 勤務時間の表示 */}
+                <div className="text-right">
+                  <div className="text-sm font-bold text-slate-700">
+                    {currentPatternDetail?.start_time.slice(0,5)} - {currentPatternDetail?.end_time.slice(0,5)}
+                  </div>
+                  <div className="text-[10px] text-slate-500">
+                    {currentPatternDetail?.description}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <hr className="border-slate-100" />
+
             {/* 業務内容 */}
             <div>
-              <label className="block text-xs font-bold text-slate-500 mb-1">業務内容</label>
+              <label className="block text-xs font-bold text-slate-500 mb-1">部活動業務内容</label>
               <select 
                 value={activityId} 
                 onChange={(e) => setActivityId(e.target.value)}
@@ -241,7 +361,7 @@ export default function Home() {
               </select>
               {isWorkDay && (activityId === 'A' || activityId === 'B') && (
                 <p className="text-[10px] text-orange-400 mt-1 text-right">
-                  ⚠️ カレンダー上は勤務日ですが、休日手当を選択中です
+                  ⚠️ 勤務日ですが、休日手当を選択中です
                 </p>
               )}
             </div>
@@ -293,6 +413,9 @@ export default function Home() {
             <button type="submit" className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed" disabled={!activityId}>
               登録する
             </button>
+            <p className="text-[10px] text-center text-slate-400">
+              ※登録ボタンを押すと、勤務パターンも同時に保存されます
+            </p>
           </form>
         </div>
         
