@@ -13,6 +13,29 @@ const ADMIN_EMAILS = [
   'tomonoem@haguroko.ed.jp'
 ].map(email => email.toLowerCase())
 
+// --- 定数定義 ---
+const OVERTIME_ITEMS = [
+  { key: 'overtime_weekday', label: '平日' },
+  { key: 'overtime_weekday2', label: '平日2' },
+  { key: 'overtime_late_night', label: '深夜' },
+  { key: 'overtime_holiday', label: '休日' },
+  { key: 'overtime_holiday_late', label: '休日深夜' },
+  { key: 'lateness', label: '遅刻' },
+  { key: 'early_leave', label: '早退' },
+]
+
+const LEAVE_ITEMS_TIME = [
+  { key: 'leave_hourly', label: '時間年休' },
+  { key: 'leave_childcare', label: '育児休暇' },
+  { key: 'leave_nursing', label: '介護休暇' },
+  { key: 'leave_special_paid', label: 'その他特休(有給)' },
+  { key: 'leave_special_unpaid', label: 'その他特休(無給)' },
+  { key: 'leave_duty_exemption', label: '義務免' },
+  { key: 'leave_holiday_shift', label: '休振' },
+  { key: 'leave_comp_day', label: '振休・代休' },
+  { key: 'leave_admin', label: '管休' },
+]
+
 type Allowance = {
   id: number
   user_id: string
@@ -34,19 +57,6 @@ type WorkPattern = {
   description: string
 }
 
-// 休暇の種類の定義
-const LEAVE_TYPES = [
-  { id: '', label: 'なし (通常勤務)' },
-  { id: '年休(1日)', label: '年休 (1日)' },
-  { id: '年休(半日)', label: '年休 (半日)' },
-  { id: '年休(時間)', label: '年休 (時間)' },
-  { id: '特休', label: '特休 (慶弔等)' },
-  { id: '振休', label: '振替休日' },
-  { id: '欠勤', label: '欠勤' },
-  { id: '育児', label: '育児休暇' },
-  { id: '介護', label: '介護休暇' },
-]
-
 const formatDate = (date: Date) => {
   const y = date.getFullYear()
   const m = ('00' + (date.getMonth() + 1)).slice(-2)
@@ -65,12 +75,17 @@ export default function Home() {
   // 入力フォームの状態
   const [selectedDate, setSelectedDate] = useState<Date>(new Date())
   const [dayType, setDayType] = useState<string>('---')
+  const [isRegistered, setIsRegistered] = useState(false)
   
-  // 勤務・休暇
+  // 勤務パターン
   const [selectedPattern, setSelectedPattern] = useState('C')
-  const [leaveType, setLeaveType] = useState('')
-  const [leaveDuration, setLeaveDuration] = useState('')
   
+  // 詳細項目（★修正：エラー回避のため any 型を使用）
+  const [details, setDetails] = useState<any>({})
+  
+  // UI制御用: カテゴリが開いているかどうか
+  const [openCategory, setOpenCategory] = useState<'overtime' | 'leave' | null>(null)
+
   // 手当関連
   const [activityId, setActivityId] = useState<string>('')
   const [destinationId, setDestinationId] = useState<string>('school')
@@ -78,9 +93,6 @@ export default function Home() {
   const [isDriving, setIsDriving] = useState(false)
   const [isAccommodation, setIsAccommodation] = useState(false)
   const [calculatedAmount, setCalculatedAmount] = useState(0)
-
-  // 既に登録済みかどうかのフラグ
-  const [isRegistered, setIsRegistered] = useState(false)
 
   useEffect(() => {
     const init = async () => {
@@ -121,18 +133,30 @@ export default function Home() {
         if (scheduleData) {
           setIsRegistered(true)
           setSelectedPattern(scheduleData.work_pattern_code || 'C')
-          setLeaveType(scheduleData.leave_type || '')
-          setLeaveDuration(scheduleData.leave_duration || '')
+          
+          // 詳細項目をStateに展開
+          const newDetails: any = {}
+          OVERTIME_ITEMS.forEach(i => { 
+            // @ts-ignore
+            if (scheduleData[i.key]) newDetails[i.key] = scheduleData[i.key] 
+          })
+          
+          if (scheduleData.leave_annual) newDetails['leave_annual'] = scheduleData.leave_annual
+          
+          LEAVE_ITEMS_TIME.forEach(i => { 
+            // @ts-ignore
+            if (scheduleData[i.key]) newDetails[i.key] = scheduleData[i.key] 
+          })
+          setDetails(newDetails)
+          
         } else {
           setIsRegistered(false)
-          // 未登録時は、曜日等からデフォルト判定（本来はCSVマスタから取得）
           setSelectedPattern('C') 
-          setLeaveType('')
-          setLeaveDuration('')
+          setDetails({})
         }
       }
 
-      // 3. 手当情報の取得（既存があればセット）
+      // 3. 手当情報の取得
       const allowance = allowances.find(a => a.date === dateStr)
       if (allowance) {
         setActivityId(allowance.activity_type === allowance.activity_type ? 
@@ -142,7 +166,6 @@ export default function Home() {
         setIsDriving(allowance.is_driving)
         setIsAccommodation(allowance.is_accommodation)
       } else {
-        // リセット
         setActivityId('')
         setDestinationId('school')
         setDestinationDetail('')
@@ -168,6 +191,16 @@ export default function Home() {
     setAllowances(data || [])
   }
 
+  // --- 詳細項目の操作ヘルパー ---
+  const updateDetail = (key: string, value: string) => {
+    setDetails((prev: any) => {
+      const next = { ...prev }
+      if (value === '') delete next[key]
+      else next[key] = value
+      return next
+    })
+  }
+
   // --- 保存処理 ---
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -176,42 +209,35 @@ export default function Home() {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
 
-    // 1. 勤務・休暇の保存
+    // 1. 勤務・詳細データの保存（★修正：any型でエラー回避）
+    const scheduleData: any = {
+      user_id: user.id,
+      date: dateStr,
+      work_pattern_code: selectedPattern,
+      leave_annual: details['leave_annual'] || null,
+    }
+
+    [...OVERTIME_ITEMS, ...LEAVE_ITEMS_TIME].forEach(item => {
+      scheduleData[item.key] = details[item.key] || null
+    })
+
+    console.log("Saving schedule data:", scheduleData) // デバッグ用ログ
+
     const { error: scheduleError } = await supabase
       .from('daily_schedules')
-      .upsert({
-        user_id: user.id,
-        date: dateStr,
-        work_pattern_code: selectedPattern,
-        leave_type: leaveType,
-        leave_duration: leaveDuration ? parseFloat(leaveDuration) : null
-      }, { onConflict: 'user_id, date' })
+      .upsert(scheduleData, { onConflict: 'user_id, date' })
 
-    if (scheduleError) console.error(scheduleError)
+    if (scheduleError) {
+      console.error('Save Error:', scheduleError)
+      alert('保存エラー(勤務): ' + scheduleError.message)
+      return
+    }
 
-    // 2. 部活動手当の保存（業務内容が選択されている場合のみ）
+    // 2. 部活動手当の保存
     if (activityId) {
-      const { error: allowanceError } = await supabase.from('allowances').upsert({
-        user_id: user.id,
-        user_email: user.email,
-        date: dateStr,
-        activity_type: ACTIVITY_TYPES.find(a => a.id === activityId)?.label || activityId,
-        destination_type: DESTINATIONS.find(d => d.id === destinationId)?.label,
-        destination_detail: destinationDetail,
-        is_driving: isDriving,
-        is_accommodation: isAccommodation,
-        amount: calculatedAmount,
-      }, { onConflict: 'user_id, date' } as any) // dateとuser_idで重複チェックしたいが、allowancesテーブルの制約による。一旦Insert/Update運用
-      
-      // 注: allowancesテーブルにunique制約がない場合、delete -> insertの方が安全だが、
-      // 簡易的にInsertし、重複は運用でカバー、または既存IDがあればUpdateするロジックが必要。
-      // ここでは既存IDがあれば削除して入れ直す方式をとる（シンプル化）
-      
-      // 既存の手当を削除
       await supabase.from('allowances').delete().eq('user_id', user.id).eq('date', dateStr)
       
-      // 新規追加
-      await supabase.from('allowances').insert({
+      const { error: allowanceError } = await supabase.from('allowances').insert({
         user_id: user.id,
         user_email: user.email,
         date: dateStr,
@@ -222,19 +248,23 @@ export default function Home() {
         is_accommodation: isAccommodation,
         amount: calculatedAmount,
       })
-
+      
+      if (allowanceError) {
+          alert('保存エラー(手当): ' + allowanceError.message)
+          return
+      }
       fetchAllowances()
     } else {
-        // 業務内容が空なら手当データは削除（休暇のみ登録のケース）
         await supabase.from('allowances').delete().eq('user_id', user.id).eq('date', dateStr)
         fetchAllowances()
     }
     
     setIsRegistered(true)
+    setOpenCategory(null)
     alert('保存しました')
   }
 
-  // --- 一括登録機能（Excelのコピペ代わり） ---
+  // --- 一括登録機能 ---
   const handleBulkRegister = async () => {
     if (!confirm(`${selectedDate.getMonth()+1}月の未入力日を、すべて「デフォルト勤務（C）」として一括登録しますか？\n（すでに入力済みの日は上書きされません）`)) return
     
@@ -248,17 +278,10 @@ export default function Home() {
     const updates = []
     
     for (let d = 1; d <= lastDay; d++) {
-        const current = new Date(year, month, d)
-        const dateStr = formatDate(current)
-        
-        // 既に登録があるかチェックしたいが、一括でupsert(ignore duplicates)するのが早い
-        // ここでは「未登録の日だけ」というロジックをSQLのON CONFLICT DO NOTHINGで実現する
         updates.push({
             user_id: user.id,
-            date: dateStr,
-            work_pattern_code: 'C', // ※本来はCSVマスタからその日の予定を取得する
-            leave_type: '',
-            leave_duration: null
+            date: formatDate(new Date(year, month, d)),
+            work_pattern_code: 'C',
         })
     }
 
@@ -282,18 +305,24 @@ export default function Home() {
   const handleLogout = async () => { await supabase.auth.signOut(); router.push('/login') }
   const handlePrevMonth = () => { const d = new Date(selectedDate); d.setMonth(d.getMonth() - 1); setSelectedDate(d) }
   const handleNextMonth = () => { const d = new Date(selectedDate); d.setMonth(d.getMonth() + 1); setSelectedDate(d) }
+  
   const calculateMonthTotal = () => {
     const m = selectedDate.getMonth(), y = selectedDate.getFullYear()
     return allowances.filter(i => { const d = new Date(i.date); return d.getMonth() === m && d.getFullYear() === y }).reduce((s, i) => s + i.amount, 0)
   }
+  
   const getTileContent = ({ date, view }: { date: Date; view: string }) => {
     if (view !== 'month') return null
     const dateStr = formatDate(date)
     const hasData = allowances.some(i => i.date === dateStr)
     return hasData ? <div className="flex justify-center mt-1"><div className="w-1.5 h-1.5 bg-blue-500 rounded-full"></div></div> : null
   }
+  
   const isAdmin = ADMIN_EMAILS.includes(userEmail.toLowerCase())
   const currentPatternDetail = workPatterns.find(p => p.code === selectedPattern)
+  
+  const hasOvertime = OVERTIME_ITEMS.some(i => details[i.key])
+  const hasLeave = details['leave_annual'] || LEAVE_ITEMS_TIME.some(i => details[i.key])
 
   return (
     <div className="min-h-screen bg-slate-50 pb-20">
@@ -314,7 +343,6 @@ export default function Home() {
           </div>
           <h1 className="text-4xl font-extrabold text-slate-800">¥{calculateMonthTotal().toLocaleString()}</h1>
           
-          {/* 一括登録ボタン */}
           <button 
             onClick={handleBulkRegister}
             className="mt-3 text-xs font-bold text-blue-600 bg-blue-50 px-4 py-2 rounded-full border border-blue-200 hover:bg-blue-100 shadow-sm"
@@ -339,7 +367,7 @@ export default function Home() {
 
           <form onSubmit={handleSave} className="flex flex-col gap-4">
             
-            {/* 勤務パターン */}
+            {/* 1. 勤務パターン */}
             <div className="bg-white p-3 rounded-xl border border-slate-200">
               <label className="block text-xs font-bold text-slate-500 mb-1">勤務パターン</label>
               <div className="flex items-center gap-2">
@@ -354,27 +382,103 @@ export default function Home() {
                 </select>
                 <div className="text-xs text-slate-500 w-1/3 text-right">{currentPatternDetail?.description}</div>
               </div>
+            </div>
 
-              {/* 休暇・変更 */}
-              <label className="block text-xs font-bold text-slate-500 mt-3 mb-1">休暇・変更 (任意)</label>
-              <div className="flex gap-2">
-                <select 
-                   value={leaveType}
-                   onChange={(e) => setLeaveType(e.target.value)}
-                   className="flex-1 bg-white p-2 rounded border border-slate-300 text-slate-900 text-xs font-bold"
-                >
-                    {LEAVE_TYPES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
-                </select>
-                {leaveType === '年休(時間)' && (
-                    <input 
-                        type="number" 
-                        placeholder="時間"
-                        value={leaveDuration}
-                        onChange={(e) => setLeaveDuration(e.target.value)}
-                        className="w-20 p-2 rounded border border-slate-300 text-slate-900 text-xs"
-                    />
-                )}
-              </div>
+            {/* 2. 超過勤務・遅刻早退 (アコーディオン風) */}
+            <div className={`bg-white rounded-xl border transition-all ${openCategory === 'overtime' ? 'border-orange-400 ring-2 ring-orange-100' : hasOvertime ? 'border-orange-300' : 'border-slate-200'}`}>
+              <button type="button" onClick={() => setOpenCategory(openCategory === 'overtime' ? null : 'overtime')} className="w-full flex justify-between items-center p-3 text-left">
+                <div className="flex items-center gap-2">
+                  <span className="text-lg">⏰</span>
+                  <span className={`text-xs font-bold ${hasOvertime ? 'text-orange-600' : 'text-slate-500'}`}>超過勤務・遅刻早退</span>
+                </div>
+                <span className="text-slate-400 text-xs">{openCategory === 'overtime' ? '▲ 閉じる' : hasOvertime ? '詳細あり ▼' : '追加する +'}</span>
+              </button>
+
+              {(openCategory === 'overtime' || hasOvertime) && (
+                <div className="p-3 pt-0 border-t border-slate-100 bg-orange-50/30 rounded-b-xl space-y-3">
+                   {/* 項目追加セレクトボックス */}
+                   {openCategory === 'overtime' && (
+                     <div className="mb-2">
+                       <p className="text-[10px] text-slate-400 mb-1">項目を選択して時間を入力:</p>
+                       <div className="flex flex-wrap gap-2">
+                         {OVERTIME_ITEMS.map(item => (
+                           <button 
+                             key={item.key} type="button"
+                             onClick={() => updateDetail(item.key, details[item.key] ? '' : '00:00')} 
+                             className={`text-xs px-2 py-1 rounded border ${details[item.key] ? 'bg-orange-500 text-white border-orange-600' : 'bg-white text-slate-500 border-slate-200'}`}
+                           >
+                             {item.label}
+                           </button>
+                         ))}
+                       </div>
+                     </div>
+                   )}
+                   
+                   {/* 入力欄リスト */}
+                   {OVERTIME_ITEMS.filter(i => details[i.key] !== undefined).map(item => (
+                     <div key={item.key} className="flex items-center gap-2 animate-fadeIn">
+                       <label className="text-xs font-bold text-slate-600 w-20">{item.label}</label>
+                       <input 
+                         type="text" placeholder="1:00"
+                         value={details[item.key] || ''}
+                         onChange={(e) => updateDetail(item.key, e.target.value)}
+                         className="flex-1 p-2 rounded border border-slate-300 text-sm"
+                       />
+                       <button type="button" onClick={() => updateDetail(item.key, '')} className="text-slate-300 hover:text-red-500">×</button>
+                     </div>
+                   ))}
+                </div>
+              )}
+            </div>
+
+            {/* 3. 休暇・欠勤 (アコーディオン風) */}
+            <div className={`bg-white rounded-xl border transition-all ${openCategory === 'leave' ? 'border-green-400 ring-2 ring-green-100' : hasLeave ? 'border-green-300' : 'border-slate-200'}`}>
+              <button type="button" onClick={() => setOpenCategory(openCategory === 'leave' ? null : 'leave')} className="w-full flex justify-between items-center p-3 text-left">
+                 <div className="flex items-center gap-2">
+                  <span className="text-lg">🌴</span>
+                  <span className={`text-xs font-bold ${hasLeave ? 'text-green-600' : 'text-slate-500'}`}>休暇・欠勤</span>
+                </div>
+                <span className="text-slate-400 text-xs">{openCategory === 'leave' ? '▲ 閉じる' : hasLeave ? '詳細あり ▼' : '追加する +'}</span>
+              </button>
+
+              {(openCategory === 'leave' || hasLeave) && (
+                <div className="p-3 pt-0 border-t border-slate-100 bg-green-50/30 rounded-b-xl space-y-3">
+                   {openCategory === 'leave' && (
+                     <div className="mb-2">
+                       <p className="text-[10px] text-slate-400 mb-1">種類を選択:</p>
+                        <div className="flex flex-wrap gap-2">
+                          {/* 年休ボタン */}
+                          <button type="button" onClick={() => updateDetail('leave_annual', details['leave_annual'] ? '' : '1日')} className={`text-xs px-2 py-1 rounded border ${details['leave_annual'] ? 'bg-green-500 text-white border-green-600' : 'bg-white text-slate-500 border-slate-200'}`}>年休(1日/半日)</button>
+                          {/* その他ボタン */}
+                          {LEAVE_ITEMS_TIME.map(item => (
+                             <button key={item.key} type="button" onClick={() => updateDetail(item.key, details[item.key] ? '' : '00:00')} className={`text-xs px-2 py-1 rounded border ${details[item.key] ? 'bg-green-500 text-white border-green-600' : 'bg-white text-slate-500 border-slate-200'}`}>{item.label}</button>
+                          ))}
+                        </div>
+                     </div>
+                   )}
+
+                   {/* 年休の入力(ラジオボタン) */}
+                   {details['leave_annual'] !== undefined && (
+                     <div className="flex items-center gap-2 animate-fadeIn bg-white p-2 rounded border border-green-200">
+                       <span className="text-xs font-bold text-green-700 w-12">年休</span>
+                       <div className="flex gap-2">
+                         <label className="flex items-center gap-1 cursor-pointer"><input type="radio" checked={details['leave_annual'] === '1日'} onChange={() => updateDetail('leave_annual', '1日')} className="accent-green-600" /><span className="text-xs">1日</span></label>
+                         <label className="flex items-center gap-1 cursor-pointer"><input type="radio" checked={details['leave_annual'] === '半日'} onChange={() => updateDetail('leave_annual', '半日')} className="accent-green-600" /><span className="text-xs">半日</span></label>
+                       </div>
+                       <button type="button" onClick={() => updateDetail('leave_annual', '')} className="ml-auto text-slate-300 hover:text-red-500">×</button>
+                     </div>
+                   )}
+
+                   {/* その他の休暇入力(時間) */}
+                   {LEAVE_ITEMS_TIME.filter(i => details[i.key] !== undefined).map(item => (
+                     <div key={item.key} className="flex items-center gap-2 animate-fadeIn">
+                       <label className="text-xs font-bold text-slate-600 w-24 truncate">{item.label}</label>
+                       <input type="text" placeholder="時間" value={details[item.key] || ''} onChange={(e) => updateDetail(item.key, e.target.value)} className="flex-1 p-2 rounded border border-slate-300 text-sm" />
+                       <button type="button" onClick={() => updateDetail(item.key, '')} className="text-slate-300 hover:text-red-500">×</button>
+                     </div>
+                   ))}
+                </div>
+              )}
             </div>
 
             <hr className="border-slate-100" />
@@ -414,7 +518,7 @@ export default function Home() {
                     <input 
                     type="text" 
                     placeholder="例: 県体育館"
-                    value={destinationDetail}
+                    value={destinationDetail} 
                     onChange={(e) => setDestinationDetail(e.target.value)}
                     className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-slate-900"
                     />
