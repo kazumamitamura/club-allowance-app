@@ -35,11 +35,17 @@ export default function AdminPage() {
   
   const [isAdmin, setIsAdmin] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [downloading, setDownloading] = useState(false) // ダウンロード処理中フラグ
   
   const [selectedMonth, setSelectedMonth] = useState(new Date())
   const [allowances, setAllowances] = useState<any[]>([])
   const [schedules, setSchedules] = useState<any[]>([])
   const [aggregatedData, setAggregatedData] = useState<any[]>([])
+  
+  // マスタデータ
+  const [userProfiles, setUserProfiles] = useState<Record<string, string>>({})
+  const [patternDefs, setPatternDefs] = useState<Record<string, {start:string, end:string}>>({})
+  
   const [userList, setUserList] = useState<{id: string, email: string}[]>([]) 
   const [selectedUserId, setSelectedUserId] = useState<string>('all')
   
@@ -56,6 +62,7 @@ export default function AdminPage() {
       }
       setIsAdmin(true)
       fetchData(selectedMonth)
+      fetchMasters()
     }
     checkAdmin()
   }, [])
@@ -71,6 +78,7 @@ export default function AdminPage() {
     fetchData(newDate)
   }
 
+  // その月のデータを取得
   const fetchData = async (date: Date) => {
     setLoading(true)
     const y = date.getFullYear()
@@ -93,6 +101,18 @@ export default function AdminPage() {
     setLoading(false)
   }
 
+  const fetchMasters = async () => {
+    const { data: users } = await supabase.from('user_profiles').select('*')
+    const pMap: Record<string, string> = {}
+    users?.forEach((u: any) => pMap[u.email] = u.full_name)
+    setUserProfiles(pMap)
+
+    const { data: patterns } = await supabase.from('work_patterns').select('*')
+    const tMap: Record<string, {start:string, end:string}> = {}
+    patterns?.forEach((p: any) => tMap[p.code] = { start: p.start_time, end: p.end_time })
+    setPatternDefs(tMap)
+  }
+
   const aggregateData = () => {
     const targets = selectedUserId === 'all' ? userList : userList.filter(u => u.id === selectedUserId)
     const result = targets.map(user => {
@@ -101,7 +121,8 @@ export default function AdminPage() {
 
         const row: any = {
             id: user.id,
-            name: user.email,
+            name: userProfiles[user.email] || user.email, // 名前優先
+            email: user.email,
             total_amount: myAllowances.reduce((sum, a) => sum + a.amount, 0),
             allowance_count: myAllowances.length,
             allowance_details: myAllowances,
@@ -147,119 +168,225 @@ export default function AdminPage() {
     return `${h}:${String(m).padStart(2, '0')}`
   }
 
-  // --- 手当用Excel出力 ---
+  // ==========================================
+  // ① 手当帳票出力
+  // ==========================================
   const downloadAllowanceExcel = () => {
     const wb = XLSX.utils.book_new()
     const y = selectedMonth.getFullYear()
     const m = selectedMonth.getMonth() + 1
 
-    // サマリー
-    const summaryData = aggregatedData.map(row => {
-        return {
-            "氏名": row.name,
-            "支給合計額": row.total_amount,
-            "支給回数": row.allowance_count,
-        }
-    })
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryData), "手当一覧")
-
-    // 詳細
-    const detailRows: any[] = []
+    const rows: any[] = []
+    
+    // 集計データをもとに出力
     aggregatedData.forEach(user => {
-        if(user.allowance_details.length === 0) return
-        detailRows.push({ "日付": `【${user.name}】` }) 
+        // 名前行
+        rows.push({ "日付": `【${user.name}】` })
         
-        // 日付順ソート
-        const sortedDetails = [...user.allowance_details].sort((a,b) => a.date.localeCompare(b.date))
-        
-        sortedDetails.forEach((d: any) => {
-            detailRows.push({ 
-                "氏名": user.name, 
-                "日付": d.date, 
-                "手当内容": d.activity_type, 
-                "区分": d.destination_type || '-',
-                "金額": d.amount 
+        // 明細行
+        if (user.allowance_details.length > 0) {
+            const sorted = [...user.allowance_details].sort((a,b) => a.date.localeCompare(b.date))
+            sorted.forEach((d: any) => {
+                rows.push({
+                    "氏名": user.name,
+                    "日付": d.date,
+                    "業務内容": d.activity_type,
+                    "区分": d.destination_type || '-',
+                    "詳細": d.destination_detail || '-',
+                    "金額": d.amount
+                })
             })
-        })
-        detailRows.push({})
+            // 合計行
+            rows.push({ "氏名": "合計", "金額": user.total_amount })
+        } else {
+            rows.push({ "氏名": "支給なし" })
+        }
+        rows.push({}) // 空行
     })
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detailRows), "手当明細")
+
+    const ws = XLSX.utils.json_to_sheet(rows)
+    XLSX.utils.book_append_sheet(wb, ws, "手当明細")
     XLSX.writeFile(wb, `特殊勤務手当_${y}年${m}月.xlsx`)
   }
 
-  // --- 勤務表用Excel出力 ---
-  const downloadScheduleExcel = () => {
+  // ==========================================
+  // ② 月間 勤務表出力
+  // ==========================================
+  const downloadMonthlyScheduleExcel = () => {
     const wb = XLSX.utils.book_new()
     const y = selectedMonth.getFullYear()
     const m = selectedMonth.getMonth() + 1
-
-    // サマリー
-    const summaryData = aggregatedData.map(row => {
-        const timeData: any = {}
-        TIME_ITEMS.forEach(t => timeData[t.label] = formatMinutes(row.time_totals[t.key]) || '-')
-        return {
-            "氏名": row.name,
-            "年休(付与)": row.annual_leave_start,
-            "年休(使用)": row.annual_leave_used,
-            "年休(残)": row.annual_leave_remain,
-            "勤務内訳": Object.entries(row.patterns).map(([k, v]) => `${k}:${v}`).join(' '),
-            ...timeData
-        }
-    })
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryData), "勤務集計")
-
-    // 詳細
-    const detailRows: any[] = []
-    aggregatedData.forEach(user => {
-        if(user.schedule_details.length === 0) return
-        detailRows.push({ "日付": `【${user.name}】` }) 
-        
-        // 日付順ソート
-        const sortedSchedules = [...user.schedule_details].sort((a,b) => a.date.localeCompare(b.date))
-
-        sortedSchedules.forEach((s: any) => {
-            detailRows.push({ 
-                "氏名": user.name, 
-                "日付": s.date, 
-                "勤務形態": s.work_pattern_code || '', 
-                "年休": s.leave_annual || '',
-            })
-        })
-        detailRows.push({})
-    })
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detailRows), "勤務明細")
+    
+    // シート作成処理を関数化（後で年間出力でも使うため）
+    const ws = createScheduleSheet(y, m, schedules)
+    
+    XLSX.utils.book_append_sheet(wb, ws, `${m}月`)
     XLSX.writeFile(wb, `勤務実績表_${y}年${m}月.xlsx`)
   }
 
-  // マスターCSV登録
-  const handleMasterCsvUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // ==========================================
+  // ③ 年間 勤務表出力 (4月〜翌3月)
+  // ==========================================
+  const downloadAnnualScheduleExcel = async () => {
+    if (!confirm('現在表示中の「年度（4月〜翌3月）」の全データを取得して出力します。\nデータ量により時間がかかる場合がありますがよろしいですか？')) return
+    
+    setDownloading(true) // ローディング表示
+    
+    try {
+        const wb = XLSX.utils.book_new()
+        
+        // 年度の開始年を決定 (例: 2026年1月なら、2025年度なので 2025)
+        const currentY = selectedMonth.getFullYear()
+        const currentM = selectedMonth.getMonth() + 1
+        const fiscalYear = currentM < 4 ? currentY - 1 : currentY
+
+        // 範囲: 4/1 〜 翌3/31
+        const startDate = `${fiscalYear}-04-01`
+        const endDate = `${fiscalYear + 1}-03-31`
+
+        // ★年間データを一括取得
+        const { data: annualSchedules } = await supabase
+            .from('daily_schedules')
+            .select('*')
+            .gte('date', startDate)
+            .lte('date', endDate)
+            .order('date')
+        
+        const safeSchedules = annualSchedules || []
+
+        // 4月から順に12枚のシートを作成
+        for (let i = 0; i < 12; i++) {
+            // シートの年月を計算 (4, 5, ... 12, 1, 2, 3)
+            const targetMonthIndex = 3 + i // 0=Jan, 3=Apr
+            const d = new Date(fiscalYear, targetMonthIndex, 1)
+            const sheetYear = d.getFullYear()
+            const sheetMonth = d.getMonth() + 1
+
+            // その月のデータだけでシート作成
+            const monthlyData = safeSchedules.filter((s: any) => {
+                const sDate = new Date(s.date)
+                return sDate.getFullYear() === sheetYear && (sDate.getMonth() + 1) === sheetMonth
+            })
+
+            const ws = createScheduleSheet(sheetYear, sheetMonth, monthlyData)
+            XLSX.utils.book_append_sheet(wb, ws, `${sheetMonth}月`)
+        }
+
+        XLSX.writeFile(wb, `勤務実績表_${fiscalYear}年度.xlsx`)
+
+    } catch (e) {
+        alert('出力中にエラーが発生しました')
+        console.error(e)
+    } finally {
+        setDownloading(false)
+    }
+  }
+
+  // --- 共通: 勤務表シート作成ロジック ---
+  const createScheduleSheet = (year: number, month: number, sourceData: any[]) => {
+    const lastDay = new Date(year, month, 0).getDate()
+    const allDates: string[] = []
+    for (let d = 1; d <= lastDay; d++) {
+        allDates.push(`${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`)
+    }
+
+    const rows: any[] = []
+    
+    // 表示対象ユーザー（フィルタリング適用）
+    const targets = selectedUserId === 'all' ? userList : userList.filter(u => u.id === selectedUserId)
+
+    targets.forEach(u => {
+        const name = userProfiles[u.email] || u.email
+        // 個人ヘッダー
+        rows.push({ "日付": `■ 勤務実績表: ${name} (${year}年${month}月)` })
+        
+        // テーブルヘッダー
+        const headerRow: any = {
+            "日付": "日付", "氏名": "氏名", "勤務形態": "勤務形態", 
+            "開始時間": "開始時間", "終了時間": "終了時間", "年休": "年休"
+        }
+        TIME_ITEMS.forEach(t => headerRow[t.label] = t.label)
+        rows.push(headerRow)
+
+        // 1日〜月末までループ
+        allDates.forEach(dateStr => {
+            const sched = sourceData.find((s: any) => s.user_id === u.id && s.date === dateStr)
+            const pattern = sched?.work_pattern_code
+            const times = pattern ? patternDefs[pattern] : null
+            
+            const row: any = {
+                "日付": dateStr,
+                "氏名": name,
+                "勤務形態": pattern || '',
+                "開始時間": times ? times.start.slice(0, 5) : '',
+                "終了時間": times ? times.end.slice(0, 5) : '',
+                "年休": sched?.leave_annual || ''
+            }
+
+            TIME_ITEMS.forEach(t => {
+                const mins = sched ? sched[t.key] : 0
+                row[t.label] = formatMinutes(mins)
+            })
+            
+            rows.push(row)
+        })
+        rows.push({}) // 空行
+        rows.push({})
+    })
+
+    const ws = XLSX.utils.json_to_sheet(rows, { skipHeader: true })
+    ws['!cols'] = [
+        { wch: 12 }, { wch: 20 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, 
+        ...TIME_ITEMS.map(() => ({ wch: 6 }))
+    ]
+    return ws
+  }
+
+  // --- CSVアップロード ---
+  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>, type: 'master' | 'users' | 'patterns') => {
     const file = e.target.files?.[0]
     if (!file) return
-    if (!confirm('勤務形態マスター（A, B, C...）を登録しますか？\n※既存の日付のデータは上書きされます。')) return
+    if (!confirm('データを登録しますか？既存データは更新されます。')) return
 
     setUploading(true)
     const reader = new FileReader()
     reader.onload = async (evt) => {
         const text = evt.target?.result as string
-        const lines = text.split(/\r\n|\n/)
-        const updates = []
+        const lines = text.split(/\r\n|\n/).filter(l => l.trim() !== '')
+        let count = 0
+
         for (const line of lines) {
-            const parts = line.split(',')
+            const parts = line.split(',').map(s => s.trim())
             if (parts.length < 2) continue
-            let dateStr = parts[0].trim().replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
-            const code = parts[1].trim()
-            dateStr = dateStr.replace(/\//g, '-') 
-            if (dateStr.match(/^\d{4}-\d{1,2}-\d{1,2}$/) && code) {
-                const [y, m, d] = dateStr.split('-')
-                const formattedDate = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
-                updates.push({ date: formattedDate, work_pattern_code: code })
+
+            if (type === 'master') {
+                let dateStr = parts[0].replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/\//g, '-')
+                const code = parts[1]
+                if (dateStr.match(/^\d{4}-\d{1,2}-\d{1,2}$/)) {
+                    const [y, m, d] = dateStr.split('-')
+                    dateStr = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
+                    await supabase.from('master_schedules').upsert({ date: dateStr, work_pattern_code: code }, { onConflict: 'date' })
+                    count++
+                }
+            } else if (type === 'users') {
+                const [email, name] = parts
+                if (email.includes('@')) {
+                    await supabase.from('user_profiles').upsert({ email: email, full_name: name })
+                    count++
+                }
+            } else if (type === 'patterns') {
+                const [code, start, end] = parts
+                if (code && start && end) {
+                    await supabase.from('work_patterns').upsert({ code, start_time: start, end_time: end }, { onConflict: 'code' })
+                    count++
+                }
             }
         }
-        if (updates.length === 0) { alert('有効なデータが見つかりませんでした'); setUploading(false); return }
-        const { error } = await supabase.from('master_schedules').upsert(updates, { onConflict: 'date' })
+        alert(`${count}件のデータを登録しました！`)
         setUploading(false)
-        if (error) alert('登録エラー: ' + error.message)
-        else { alert(`${updates.length}件のマスターデータを登録しました！`); e.target.value = '' }
+        e.target.value = ''
+        fetchMasters() 
+        fetchData(selectedMonth)
     }
     reader.readAsText(file)
   }
@@ -288,29 +415,40 @@ export default function AdminPage() {
             <span className="text-sm font-bold text-slate-600">表示対象:</span>
             <select className="p-2 border border-slate-300 rounded font-bold text-sm" value={selectedUserId} onChange={(e) => setSelectedUserId(e.target.value)}>
                 <option value="all">全員を表示</option>
-                {userList.map(u => <option key={u.id} value={u.id}>{u.email}</option>)}
+                {userList.map(u => (
+                    <option key={u.id} value={u.id}>
+                        {userProfiles[u.email] ? `${userProfiles[u.email]} (${u.email})` : u.email}
+                    </option>
+                ))}
             </select>
           </div>
 
-          <div className="flex gap-4 items-center flex-wrap justify-end">
-             <div className="flex bg-slate-100 p-1 rounded-lg">
-               <button onClick={() => setViewMode('allowance')} className={`px-4 py-2 rounded-md text-sm font-bold transition-all ${viewMode === 'allowance' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>💰 表示:手当</button>
-               <button onClick={() => setViewMode('schedule')} className={`px-4 py-2 rounded-md text-sm font-bold transition-all ${viewMode === 'schedule' ? 'bg-white text-green-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>⏰ 表示:勤務</button>
-             </div>
-             
-             {/* 出力ボタン群 */}
-             <div className="flex gap-2">
-                <button onClick={downloadAllowanceExcel} className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-blue-700 shadow flex items-center gap-1">
-                    📥 手当帳票
-                </button>
-                <button onClick={downloadScheduleExcel} className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-green-700 shadow flex items-center gap-1">
-                    📥 勤務管理表
-                </button>
-             </div>
+          {/* 右上の表示切替 */}
+          <div className="flex gap-2">
+             <button onClick={() => setViewMode('allowance')} className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${viewMode === 'allowance' ? 'bg-blue-600 text-white shadow' : 'bg-slate-100 text-slate-500'}`}>💰 手当画面</button>
+             <button onClick={() => setViewMode('schedule')} className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${viewMode === 'schedule' ? 'bg-green-600 text-white shadow' : 'bg-slate-100 text-slate-500'}`}>⏰ 勤務画面</button>
           </div>
         </div>
 
-        {/* データ表示エリア（既存のまま） */}
+        {/* 出力ボタンエリア（独立させて目立たせる） */}
+        <div className="bg-white p-4 rounded-xl shadow border border-slate-200 flex flex-wrap gap-4 items-center justify-end">
+            <span className="text-sm font-bold text-slate-500 mr-auto">帳票出力メニュー:</span>
+            
+            <button onClick={downloadAllowanceExcel} className="bg-blue-600 text-white px-5 py-2 rounded-lg text-sm font-bold hover:bg-blue-700 shadow flex items-center gap-2">
+                💰 手当帳票 (.xlsx)
+            </button>
+            
+            <div className="h-8 w-px bg-slate-300 mx-2"></div>
+
+            <button onClick={downloadMonthlyScheduleExcel} className="bg-green-600 text-white px-5 py-2 rounded-lg text-sm font-bold hover:bg-green-700 shadow flex items-center gap-2">
+                📅 月間 勤務表 (.xlsx)
+            </button>
+            <button onClick={downloadAnnualScheduleExcel} disabled={downloading} className="bg-green-800 text-white px-5 py-2 rounded-lg text-sm font-bold hover:bg-green-900 shadow flex items-center gap-2">
+                {downloading ? '⏳ 出力中...' : '📅 年間 勤務表 (4月-3月) (.xlsx)'}
+            </button>
+        </div>
+
+        {/* データ表示テーブル */}
         {loading ? (
           <div className="text-center py-20 text-slate-500 font-bold animate-pulse">データを集計中...</div>
         ) : (
@@ -322,11 +460,10 @@ export default function AdminPage() {
                         <tr><th className="p-4 font-bold w-1/4">氏名</th><th className="p-4 font-bold text-right w-1/6">支給合計額</th><th className="p-4 font-bold">内訳（削除可能）</th></tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200">
-                        {aggregatedData.length === 0 && <tr><td colSpan={3} className="p-10 text-center text-slate-400">データがありません</td></tr>}
                         {aggregatedData.map((user, i) => (
                         <tr key={i} className="hover:bg-slate-50">
                             <td className="p-4 font-bold align-top">{user.name}</td>
-                            <td className="p-4 text-right font-extrabold text-blue-700 align-top text-lg">¥{user.total_amount.toLocaleString()}<div className="text-xs text-slate-400 font-normal mt-1">{user.allowance_count}回</div></td>
+                            <td className="p-4 text-right font-extrabold text-blue-700 align-top text-lg">¥{user.total_amount.toLocaleString()}</td>
                             <td className="p-4">
                                 <div className="flex flex-wrap gap-2">
                                     {user.allowance_details.map((d: any) => (
@@ -360,7 +497,6 @@ export default function AdminPage() {
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200">
-                        {aggregatedData.length === 0 && <tr><td colSpan={20} className="p-10 text-center text-slate-400">データがありません</td></tr>}
                         {aggregatedData.map((user, i) => (
                         <tr key={i} className="hover:bg-yellow-50 transition-colors text-slate-900">
                             <td className="p-4 font-bold sticky left-0 bg-white border-r border-slate-200 z-10">{user.name}</td>
@@ -378,17 +514,22 @@ export default function AdminPage() {
           </div>
         )}
 
-        <div className="bg-slate-200 p-6 rounded-xl border border-slate-300 mt-8">
-            <h2 className="font-bold text-slate-700 mb-4 flex items-center gap-2">⚙️ システム管理：勤務形態マスター登録</h2>
-            <div className="bg-white p-6 rounded-lg shadow-sm">
-                <p className="text-sm text-slate-600 mb-4">
-                    全教員に適用される「勤務形態（A, B...）」をCSVファイルで一括登録します。<br/>
-                    <span className="text-red-500 font-bold">※ 管理者が一度行えば、全教員の「カレンダー」に即座に反映されます。</span>
-                </p>
-                <div className="flex items-center gap-4">
-                    <input type="file" accept=".csv" onChange={handleMasterCsvUpload} disabled={uploading} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
-                    {uploading && <span className="text-blue-600 font-bold animate-pulse">登録中...</span>}
-                </div>
+        {/* ⚙️ システム管理エリア */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
+                <h3 className="font-bold text-slate-700 mb-2">📅 ① カレンダー予定登録</h3>
+                <p className="text-xs text-slate-500 mb-2">全員の予定を一括登録（日付, パターン）</p>
+                <input type="file" accept=".csv" onChange={(e) => handleUpload(e, 'master')} disabled={uploading} className="text-xs w-full"/>
+            </div>
+            <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
+                <h3 className="font-bold text-slate-700 mb-2">⏰ ② 勤務時間定義</h3>
+                <p className="text-xs text-slate-500 mb-2">A=8:15...を定義（コード, 開始, 終了）</p>
+                <input type="file" accept=".csv" onChange={(e) => handleUpload(e, 'patterns')} disabled={uploading} className="text-xs w-full"/>
+            </div>
+            <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
+                <h3 className="font-bold text-slate-700 mb-2">🧑‍🏫 ③ 氏名マスタ登録</h3>
+                <p className="text-xs text-slate-500 mb-2">メアドと氏名を紐付け（Email, 氏名）</p>
+                <input type="file" accept=".csv" onChange={(e) => handleUpload(e, 'users')} disabled={uploading} className="text-xs w-full"/>
             </div>
         </div>
 
