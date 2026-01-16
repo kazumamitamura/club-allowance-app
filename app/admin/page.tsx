@@ -264,7 +264,7 @@ export default function AdminPage() {
     return ws
   }
 
-  // ★修正: GoogleコンタクトCSV対応のアップロード機能
+  // ★修正: GoogleコンタクトCSV対応のアップロード機能（全角スペース除去版）
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>, type: 'master' | 'users' | 'patterns') => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -277,12 +277,9 @@ export default function AdminPage() {
         const data = new Uint8Array(evt.target?.result as ArrayBuffer)
         const wb = XLSX.read(data, { type: 'array' })
         const sheet = wb.Sheets[wb.SheetNames[0]]
-        
-        // 配列として読み込み（ヘッダー処理のため）
         const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][]
         let count = 0
 
-        // 空行を除去
         const cleanRows = rows.filter(row => row.length > 0)
 
         if (type === 'users') {
@@ -297,12 +294,15 @@ export default function AdminPage() {
                  for (let i = 1; i < cleanRows.length; i++) {
                      const row = cleanRows[i]
                      const email = row[emailIdx]
-                     const lastName = row[lastIdx] || ''
-                     const firstName = row[firstIdx] || ''
-                     // 名前結合（全角スペース除去して結合）
-                     const fullName = `${lastName} ${firstName}`.replace(/　/g, ' ').trim()
                      
-                     if (email && email.includes('@')) {
+                     // ★修正ポイント: 全角・半角スペースを除去してから結合
+                     let lastName = String(row[lastIdx] || '').replace(/[ 　]+/g, '')
+                     let firstName = String(row[firstIdx] || '').replace(/[ 　]+/g, '')
+                     
+                     // 姓 + 半角スペース + 名
+                     const fullName = `${lastName} ${firstName}`.trim()
+                     
+                     if (email && String(email).includes('@')) {
                          await supabase.from('user_profiles').upsert({ email, full_name: fullName })
                          count++
                      }
@@ -320,18 +320,15 @@ export default function AdminPage() {
              }
 
         } else {
-            // master, patterns は以前と同様のロジック（XLSX経由でより堅牢に）
+             // 他のCSVタイプ
              for (const row of cleanRows) {
                  if (type === 'master') {
-                    // 日付, パターン
                     let dateStr = String(row[0]).replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/\//g, '-')
                     const code = row[1]
-                    // エクセルのシリアル値日付に対応
                     if (!isNaN(Number(row[0])) && Number(row[0]) > 40000) {
                         const d = new Date((Number(row[0]) - 25569) * 86400 * 1000)
                         dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
                     }
-
                     if (dateStr.match(/^\d{4}-\d{1,2}-\d{1,2}$/)) {
                         const [y, m, d] = dateStr.split('-')
                         const fmtDate = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
@@ -339,7 +336,6 @@ export default function AdminPage() {
                         count++
                     }
                  } else if (type === 'patterns') {
-                    // コード, 開始, 終了
                     const code = row[0]
                     const start = row[1]
                     const end = row[2]
