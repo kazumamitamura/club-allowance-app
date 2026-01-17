@@ -45,7 +45,6 @@ export default function AdminPage() {
   const [userProfiles, setUserProfiles] = useState<Record<string, string>>({})
   const [patternDefs, setPatternDefs] = useState<Record<string, {start:string, end:string}>>({})
   
-  // ★追加: ステータス管理も2種類に
   const [allowanceStatuses, setAllowanceStatuses] = useState<Record<string, any>>({})
   const [scheduleStatuses, setScheduleStatuses] = useState<Record<string, any>>({})
 
@@ -54,6 +53,10 @@ export default function AdminPage() {
   
   const [viewMode, setViewMode] = useState<'allowance' | 'schedule'>('allowance')
   const [uploading, setUploading] = useState(false)
+
+  // ファイル保持用
+  const [masterFile, setMasterFile] = useState<File | null>(null)
+  const [patternFile, setPatternFile] = useState<File | null>(null)
 
   useEffect(() => {
     const checkAdmin = async () => {
@@ -92,7 +95,6 @@ export default function AdminPage() {
     const { data: allowData } = await supabase.from('allowances').select('*').gte('date', startDate).lte('date', endDate).order('date')
     const { data: schedData } = await supabase.from('daily_schedules').select('*').gte('date', startDate).lte('date', endDate).order('date')
     
-    // ★ステータス取得 (allowanceとscheduleを分ける)
     const ym = `${y}-${String(m).padStart(2, '0')}`
     const { data: appData } = await supabase.from('monthly_applications').select('*').eq('year_month', ym)
     
@@ -148,8 +150,6 @@ export default function AdminPage() {
     const result = targets.map(user => {
         const myAllowances = allowances.filter(a => a.user_id === user.id)
         const mySchedules = schedules.filter(s => s.user_id === user.id)
-        
-        // ステータスオブジェクトを取得
         const allowApp = allowanceStatuses[user.id] || {}
         const schedApp = scheduleStatuses[user.id] || {}
 
@@ -157,13 +157,10 @@ export default function AdminPage() {
             id: user.id,
             name: userProfiles[user.email] || user.email, 
             email: user.email,
-            
-            // ★ステータス情報を保持
             allowStatus: allowApp.status || 'draft',
             schedStatus: schedApp.status || 'draft',
             allowApprovedAt: allowApp.approved_at,
             schedApprovedAt: schedApp.approved_at,
-
             total_amount: myAllowances.reduce((sum, a) => sum + a.amount, 0),
             allowance_count: myAllowances.length,
             allowance_details: myAllowances,
@@ -188,7 +185,6 @@ export default function AdminPage() {
     setAggregatedData(result)
   }
 
-  // ★承認・差し戻し処理
   const updateStatus = async (userId: string, type: 'allowance' | 'schedule', newStatus: string) => {
     const actionName = newStatus === 'approved' ? '承認' : '差し戻し'
     if (!confirm(`${actionName}しますか？`)) return
@@ -206,14 +202,12 @@ export default function AdminPage() {
     fetchData(selectedMonth)
   }
 
-  // ★日付フォーマット
   const fmtDate = (iso: string) => {
       if (!iso) return ''
       const d = new Date(iso)
       return `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')}`
   }
 
-  // ① 手当帳票
   const downloadAllowanceExcel = () => {
     const wb = XLSX.utils.book_new()
     const y = selectedMonth.getFullYear()
@@ -221,12 +215,10 @@ export default function AdminPage() {
     const rows: any[] = []
     
     aggregatedData.forEach(user => {
-        // ★修正: 承認者名の印字ロジック
         let header = `【${user.name}】`
         if (user.allowStatus === 'approved') {
             header += `  [承認済: ${fmtDate(user.allowApprovedAt)}  承認者: 友野・武田事務長]`
         }
-        
         rows.push({ "日付": header })
         if (user.allowance_details.length > 0) {
             const sorted = [...user.allowance_details].sort((a,b) => a.date.localeCompare(b.date))
@@ -243,7 +235,6 @@ export default function AdminPage() {
     XLSX.writeFile(wb, `特殊勤務手当_${y}年${m}月.xlsx`)
   }
 
-  // ② 月間 勤務表
   const downloadMonthlyScheduleExcel = () => {
     const wb = XLSX.utils.book_new()
     const y = selectedMonth.getFullYear()
@@ -253,7 +244,6 @@ export default function AdminPage() {
     XLSX.writeFile(wb, `勤務実績表_${y}年${m}月.xlsx`)
   }
 
-  // ③ 年間 勤務表
   const downloadAnnualScheduleExcel = async () => {
     if (!confirm('出力しますか？')) return
     setDownloading(true)
@@ -286,21 +276,14 @@ export default function AdminPage() {
     const rows: any[] = []
     const targets = selectedUserId === 'all' ? userList : userList.filter(u => u.id === selectedUserId)
 
-    // ★勤務表ステータスも取得したいが、年間出力の場合は複雑になるため、
-    // 簡易的に月間出力の時のみカレント月のステータスを反映させる実装とする。
-    // (厳密にするなら年間分のステータス取得が必要だが、ここでは月間出力を優先)
-
     targets.forEach(u => {
         const name = userProfiles[u.email] || u.email
         let header = `■ 勤務実績表: ${name} (${year}年${month}月)`
-        
-        // ★修正: 勤務表の承認者名印字 (現在表示中の月と一致する場合のみ印字)
         const isCurrentViewMonth = year === selectedMonth.getFullYear() && month === (selectedMonth.getMonth() + 1)
         if (isCurrentViewMonth && scheduleStatuses[u.id]?.status === 'approved') {
             const date = scheduleStatuses[u.id].approved_at
             header += `  [承認済: ${fmtDate(date)}  承認者: 小松・武田事務長]`
         }
-
         rows.push({ "日付": header })
         const headerRow: any = { "日付": "日付", "氏名": "氏名", "勤務形態": "勤務形態", "開始時間": "開始時間", "終了時間": "終了時間", "年休": "年休" }
         TIME_ITEMS.forEach(t => headerRow[t.label] = t.label)
@@ -324,14 +307,15 @@ export default function AdminPage() {
     return ws
   }
 
-  // CSVアップロード (共通)
-  const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>, type: 'master' | 'users' | 'patterns') => {
-    // ... (前回の最強コードと同じ内容) ...
-    const file = e.target.files?.[0]
-    if (!file) return
-    if (!confirm('データを登録しますか？')) return
+  // ★修正: CSV実行処理（ファイルを選んでボタンを押す形式）
+  const processUpload = async (type: 'master' | 'patterns') => {
+    const file = type === 'master' ? masterFile : patternFile
+    if (!file) { alert('ファイルを選択してください'); return }
+    if (!confirm('データを登録しますか？既存データは更新されます。')) return
+
     setUploading(true)
     const reader = new FileReader()
+    
     reader.onload = async (evt) => {
         try {
             const data = new Uint8Array(evt.target?.result as ArrayBuffer)
@@ -340,43 +324,24 @@ export default function AdminPage() {
             const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][]
             let count = 0
             const cleanRows = rows.filter(row => row.length > 0)
-            
-            if (type === 'users') {
-                 const headerRow = cleanRows[0].map(h => String(h).trim())
-                 let emailIdx = headerRow.findIndex(h => h.includes('E-mail 1 - Value'))
-                 let lastIdx = headerRow.findIndex(h => h.includes('Last Name'))
-                 let firstIdx = headerRow.findIndex(h => h.includes('First Name'))
-                 if (emailIdx === -1) emailIdx = 0 
-                 if (lastIdx === -1) lastIdx = 1
-                 for (let i = 1; i < cleanRows.length; i++) {
-                     const row = cleanRows[i]
-                     const email = row[emailIdx]
-                     let fullName = ''
-                     if (lastIdx !== -1 && firstIdx !== -1) {
-                         const ln = String(row[lastIdx] || '').replace(/[ 　]+/g, '')
-                         const fn = String(row[firstIdx] || '').replace(/[ 　]+/g, '')
-                         fullName = `${ln} ${fn}`.trim()
-                     } else { fullName = String(row[lastIdx] || '').replace(/[ 　]+/g, '') }
-                     if (email && String(email).includes('@') && fullName) {
-                         await supabase.from('user_profiles').upsert({ email: String(email).trim(), full_name: fullName })
-                         count++
-                     }
-                 }
-            } else {
-                 for (const row of cleanRows) {
-                     if (type === 'master') {
-                        let dateStr = String(row[0]).replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/\//g, '-')
-                        const code = row[1]
-                        if (!isNaN(Number(row[0])) && Number(row[0]) > 40000) { const d = new Date((Number(row[0]) - 25569) * 86400 * 1000); dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}` }
-                        if (dateStr.match(/^\d{4}-\d{1,2}-\d{1,2}$/)) { const [y, m, d] = dateStr.split('-'); const fmtDate = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`; await supabase.from('master_schedules').upsert({ date: fmtDate, work_pattern_code: code }, { onConflict: 'date' }); count++ }
-                     } else if (type === 'patterns') {
-                        const code = row[0]; const start = row[1]; const end = row[2]
-                        if (code && start && end) { await supabase.from('work_patterns').upsert({ code, start_time: start, end_time: end }, { onConflict: 'code' }); count++ }
-                     }
-                 }
+
+            for (const row of cleanRows) {
+                if (type === 'master') {
+                    let dateStr = String(row[0]).replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/\//g, '-')
+                    const code = row[1]
+                    if (!isNaN(Number(row[0])) && Number(row[0]) > 40000) { const d = new Date((Number(row[0]) - 25569) * 86400 * 1000); dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}` }
+                    if (dateStr.match(/^\d{4}-\d{1,2}-\d{1,2}$/)) { const [y, m, d] = dateStr.split('-'); const fmtDate = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`; await supabase.from('master_schedules').upsert({ date: fmtDate, work_pattern_code: code }, { onConflict: 'date' }); count++ }
+                } else if (type === 'patterns') {
+                    const code = row[0]; const start = row[1]; const end = row[2]
+                    if (code && start && end) { await supabase.from('work_patterns').upsert({ code, start_time: start, end_time: end }, { onConflict: 'code' }); count++ }
+                }
             }
-            alert(`${count}件のデータを登録しました！`); fetchMasters(); fetchData(selectedMonth)
-        } catch (e: any) { alert('読込エラー: ' + e.message) } finally { setUploading(false); e.target.value = '' }
+            alert(`${count}件のデータを登録しました！`)
+            if(type === 'master') setMasterFile(null)
+            else setPatternFile(null)
+            fetchMasters()
+            fetchData(selectedMonth)
+        } catch (e: any) { alert('読込エラー: ' + e.message) } finally { setUploading(false) }
     }
     reader.readAsArrayBuffer(file)
   }
@@ -393,7 +358,7 @@ export default function AdminPage() {
       </div>
 
       <div className="max-w-[95%] mx-auto p-6 space-y-8">
-        {/* メイン操作 */}
+        
         <div className="flex flex-col md:flex-row justify-between items-center gap-4 bg-white p-4 rounded-xl shadow border border-slate-200">
           <div className="flex items-center gap-4">
             <button onClick={() => handleMonthChange(-1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold">‹</button>
@@ -413,7 +378,6 @@ export default function AdminPage() {
           </div>
         </div>
 
-        {/* 出力ボタンエリア */}
         <div className="bg-white p-4 rounded-xl shadow border border-slate-200 flex flex-wrap gap-4 items-center justify-end">
             <span className="text-sm font-bold text-slate-500 mr-auto">帳票出力メニュー:</span>
             <button onClick={downloadAllowanceExcel} className="bg-blue-600 text-white px-5 py-2 rounded-lg text-sm font-bold hover:bg-blue-700 shadow flex items-center gap-2">💰 手当帳票 (.xlsx)</button>
@@ -422,10 +386,8 @@ export default function AdminPage() {
             <button onClick={downloadAnnualScheduleExcel} disabled={downloading} className="bg-green-800 text-white px-5 py-2 rounded-lg text-sm font-bold hover:bg-green-900 shadow flex items-center gap-2">{downloading ? '⏳ 出力中...' : '📅 年間 勤務表 (4月-3月)'}</button>
         </div>
 
-        {/* データテーブル */}
-        {loading ? (
-          <div className="text-center py-20 text-slate-500 font-bold animate-pulse">データを集計中...</div>
-        ) : (
+        {/* テーブル表示部分は省略せずそのまま記述 */}
+        {loading ? <div className="text-center py-20 text-slate-500 font-bold animate-pulse">データを集計中...</div> : (
           <div className="bg-white rounded-xl shadow overflow-hidden border border-slate-200">
             {viewMode === 'allowance' && (
                 <div className="overflow-x-auto">
@@ -439,22 +401,12 @@ export default function AdminPage() {
                             <td className="p-4 font-bold align-top">
                                 <div>{user.name}</div>
                                 {user.allowStatus === 'submitted' && <span className="inline-block bg-yellow-100 text-yellow-700 text-[10px] px-2 py-0.5 rounded border border-yellow-300 mt-1">⏳ 申請中</span>}
-                                {user.allowStatus === 'approved' && (
-                                    <div className="mt-1">
-                                        <span className="inline-block bg-green-100 text-green-700 text-[10px] px-2 py-0.5 rounded border border-green-300">🈴 承認済</span>
-                                        <div className="text-[10px] text-slate-400 mt-1">{fmtDate(user.allowApprovedAt)}</div>
-                                    </div>
-                                )}
+                                {user.allowStatus === 'approved' && <div className="mt-1"><span className="inline-block bg-green-100 text-green-700 text-[10px] px-2 py-0.5 rounded border border-green-300">🈴 承認済</span><div className="text-[10px] text-slate-400 mt-1">{fmtDate(user.allowApprovedAt)}</div></div>}
                             </td>
                             <td className="p-4 text-right font-extrabold text-blue-700 align-top text-lg">¥{user.total_amount.toLocaleString()}</td>
                             <td className="p-4">
                                 <div className="flex flex-wrap gap-2">
-                                    {user.allowance_details.map((d: any) => (
-                                    <div key={d.id} className="bg-white border border-slate-200 px-3 py-2 rounded-lg shadow-sm flex items-center gap-3">
-                                        <span className="font-bold text-slate-700">{d.date.slice(8)}日</span><span className="text-slate-600 text-xs">{d.activity_type}</span><span className="font-bold text-blue-600">¥{d.amount.toLocaleString()}</span>
-                                        <button onClick={() => handleDeleteAllowance(d.id)} className="text-slate-300 hover:text-red-500 text-lg leading-none">×</button>
-                                    </div>
-                                    ))}
+                                    {user.allowance_details.map((d: any) => (<div key={d.id} className="bg-white border border-slate-200 px-3 py-2 rounded-lg shadow-sm flex items-center gap-3"><span className="font-bold text-slate-700">{d.date.slice(8)}日</span><span className="text-slate-600 text-xs">{d.activity_type}</span><span className="font-bold text-blue-600">¥{d.amount.toLocaleString()}</span><button onClick={() => handleDeleteAllowance(d.id)} className="text-slate-300 hover:text-red-500 text-lg leading-none">×</button></div>))}
                                 </div>
                             </td>
                             <td className="p-4 text-center">
@@ -467,27 +419,17 @@ export default function AdminPage() {
                     </table>
                 </div>
             )}
-            
             {viewMode === 'schedule' && (
                 <div className="overflow-x-auto">
                     <table className="w-full text-left text-sm whitespace-nowrap">
                     <thead className="bg-slate-800 text-white">
                         <tr>
-                        <th className="p-4 font-bold sticky left-0 bg-slate-800 z-10 border-r border-slate-600 w-48">
-                            <div className="flex justify-between items-center">
-                                <span>氏名 (勤務ステータス)</span>
-                                <span className="text-[10px] font-normal opacity-70">承認操作</span>
-                            </div>
-                        </th>
+                        <th className="p-4 font-bold sticky left-0 bg-slate-800 z-10 border-r border-slate-600 w-48"><div className="flex justify-between items-center"><span>氏名 (勤務ステータス)</span><span className="text-[10px] font-normal opacity-70">承認操作</span></div></th>
                         <th className="p-4 font-bold text-center bg-orange-900 border-l border-slate-600" colSpan={3}>年休管理</th>
                         <th className="p-4 font-bold border-l border-slate-600">勤務形態</th>
                         {TIME_ITEMS.map(item => <th key={item.key} className="p-4 font-bold text-center border-l border-slate-600 min-w-[80px]">{item.label}</th>)}
                         </tr>
-                        <tr className="bg-orange-800 text-xs text-orange-100">
-                            <th className="sticky left-0 bg-slate-800 z-10 border-r border-slate-600"></th>
-                            <th className="p-1 text-center border-l border-orange-700">使用</th><th className="p-1 text-center border-l border-orange-700">残</th><th className="p-1 text-center border-l border-orange-700">時休計</th><th className="border-l border-slate-600"></th>
-                            {TIME_ITEMS.map(i => <th key={i.key} className="border-l border-slate-600"></th>)}
-                        </tr>
+                        <tr className="bg-orange-800 text-xs text-orange-100"><th className="sticky left-0 bg-slate-800 z-10 border-r border-slate-600"></th><th className="p-1 text-center border-l border-orange-700">使用</th><th className="p-1 text-center border-l border-orange-700">残</th><th className="p-1 text-center border-l border-orange-700">時休計</th><th className="border-l border-slate-600"></th>{TIME_ITEMS.map(i => <th key={i.key} className="border-l border-slate-600"></th>)}</tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200">
                         {aggregatedData.map((user, i) => (
@@ -496,14 +438,8 @@ export default function AdminPage() {
                                 <div className="mb-2">{user.name}</div>
                                 <div className="flex flex-col gap-1 mb-2">
                                     {user.schedStatus === 'submitted' && <span className="inline-block bg-yellow-100 text-yellow-700 text-[10px] px-2 py-0.5 rounded border border-yellow-300 text-center">⏳ 申請中</span>}
-                                    {user.schedStatus === 'approved' && (
-                                        <>
-                                        <span className="inline-block bg-green-100 text-green-700 text-[10px] px-2 py-0.5 rounded border border-green-300 text-center">🈴 承認済</span>
-                                        <span className="text-[9px] text-slate-400 text-center">{fmtDate(user.schedApprovedAt)}</span>
-                                        </>
-                                    )}
+                                    {user.schedStatus === 'approved' && <><span className="inline-block bg-green-100 text-green-700 text-[10px] px-2 py-0.5 rounded border border-green-300 text-center">🈴 承認済</span><span className="text-[9px] text-slate-400 text-center">{fmtDate(user.schedApprovedAt)}</span></>}
                                 </div>
-                                {/* 勤務表モード用の承認ボタン */}
                                 {user.schedStatus === 'submitted' && <button onClick={() => updateStatus(user.id, 'schedule', 'approved')} className="bg-green-600 text-white px-3 py-1 rounded text-xs font-bold shadow hover:bg-green-700 w-full mb-1">勤務承認</button>}
                                 {(user.schedStatus === 'submitted' || user.schedStatus === 'approved') && <button onClick={() => updateStatus(user.id, 'schedule', 'draft')} className="bg-slate-200 text-slate-600 px-3 py-1 rounded text-xs font-bold hover:bg-slate-300 w-full">差し戻し</button>}
                             </td>
@@ -521,10 +457,23 @@ export default function AdminPage() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200"><h3 className="font-bold text-slate-700 mb-2">📅 ① カレンダー予定登録</h3><p className="text-xs text-slate-500 mb-2">全員の予定を一括登録（日付, パターン）</p><input type="file" accept=".csv" onChange={(e) => handleUpload(e, 'master')} disabled={uploading} className="text-xs w-full"/></div>
-            <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200"><h3 className="font-bold text-slate-700 mb-2">⏰ ② 勤務時間定義</h3><p className="text-xs text-slate-500 mb-2">A=8:15...を定義（コード, 開始, 終了）</p><input type="file" accept=".csv" onChange={(e) => handleUpload(e, 'patterns')} disabled={uploading} className="text-xs w-full"/></div>
-            <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200"><h3 className="font-bold text-slate-700 mb-2">🧑‍🏫 ③ 氏名マスタ登録</h3><p className="text-xs text-slate-500 mb-2">GoogleコンタクトCSV または (Email,氏名)</p><input type="file" accept=".csv" onChange={(e) => handleUpload(e, 'users')} disabled={uploading} className="text-xs w-full"/></div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200">
+                <h3 className="font-bold text-slate-700 mb-4 flex items-center gap-2">📅 ① カレンダー予定登録</h3>
+                <p className="text-xs text-slate-500 mb-4">全員の予定を一括登録（日付, パターン）</p>
+                <input type="file" accept=".csv" onChange={(e) => setMasterFile(e.target.files?.[0] || null)} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
+                <button onClick={() => processUpload('master')} disabled={!masterFile || uploading} className="mt-4 w-full bg-blue-600 text-white font-bold py-3 rounded-lg shadow-md hover:bg-blue-700 active:scale-95 active:bg-blue-800 transition-all disabled:opacity-50 disabled:active:scale-100">
+                    登録を実行する
+                </button>
+            </div>
+            <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200">
+                <h3 className="font-bold text-slate-700 mb-4 flex items-center gap-2">⏰ ② 勤務時間定義</h3>
+                <p className="text-xs text-slate-500 mb-4">A=8:15...を定義（コード, 開始, 終了）</p>
+                <input type="file" accept=".csv" onChange={(e) => setPatternFile(e.target.files?.[0] || null)} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
+                <button onClick={() => processUpload('patterns')} disabled={!patternFile || uploading} className="mt-4 w-full bg-blue-600 text-white font-bold py-3 rounded-lg shadow-md hover:bg-blue-700 active:scale-95 active:bg-blue-800 transition-all disabled:opacity-50 disabled:active:scale-100">
+                    登録を実行する
+                </button>
+            </div>
         </div>
       </div>
     </div>

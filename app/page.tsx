@@ -40,6 +40,7 @@ export default function Home() {
   
   const [userEmail, setUserEmail] = useState('')
   const [userId, setUserId] = useState('')
+  const [userName, setUserName] = useState('') // 表示名
   const [isAdmin, setIsAdmin] = useState(false)
 
   const [allowances, setAllowances] = useState<Allowance[]>([])
@@ -59,6 +60,11 @@ export default function Home() {
   
   const [openCategory, setOpenCategory] = useState<'leave' | null>(null)
 
+  // 氏名登録モーダル用
+  const [showProfileModal, setShowProfileModal] = useState(false)
+  const [inputLastName, setInputLastName] = useState('')
+  const [inputFirstName, setInputFirstName] = useState('')
+
   const [activityId, setActivityId] = useState('')
   const [destinationId, setDestinationId] = useState('school')
   const [destinationDetail, setDestinationDetail] = useState('')
@@ -66,20 +72,14 @@ export default function Home() {
   const [isAccommodation, setIsAccommodation] = useState(false)
   const [calculatedAmount, setCalculatedAmount] = useState(0)
 
-  // ★修正: ロック判定を分離（月次締めチェックは共通、申請状態は個別）
   const getLockStatus = (targetDate: Date) => {
     if (isAdmin) return { schedule: false, allowance: false }
-    
-    // 1. 共通の月次締め切りチェック
     const now = new Date()
     const deadline = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 6, 0, 0, 0)
     const isPastDeadline = now >= deadline
-
-    // 2. 申請状態チェック
     const currentViewMonth = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, '0')}`
     const targetMonth = `${targetDate.getFullYear()}-${String(targetDate.getMonth() + 1).padStart(2, '0')}`
     const isTargetMonth = currentViewMonth === targetMonth
-
     return {
         schedule: isPastDeadline || (isTargetMonth && scheduleStatus !== 'draft'),
         allowance: isPastDeadline || (isTargetMonth && allowanceStatus !== 'draft')
@@ -95,6 +95,10 @@ export default function Home() {
       setUserEmail(user.email || '')
       setUserId(user.id)
       if (ADMIN_EMAILS.includes(user.email?.toLowerCase() || '')) setIsAdmin(true)
+      
+      // プロフィール取得
+      fetchProfile(user.email || '')
+
       fetchData(user.id)
       fetchSchoolCalendar()
       fetchMasterSchedules()
@@ -104,6 +108,40 @@ export default function Home() {
     }
     init()
   }, [])
+
+  // ★氏名取得
+  const fetchProfile = async (email: string) => {
+      const { data } = await supabase.from('user_profiles').select('full_name').eq('email', email).single()
+      if (data?.full_name) {
+          setUserName(data.full_name)
+      } else {
+          // 名前未登録ならモーダルを出す（任意）
+          // setShowProfileModal(true) 
+      }
+  }
+
+  // ★氏名保存処理
+  const handleSaveProfile = async () => {
+      if (!inputLastName || !inputFirstName) {
+          alert('姓と名の両方を入力してください')
+          return
+      }
+      // 半角スペースで結合
+      const fullName = `${inputLastName.trim()} ${inputFirstName.trim()}`
+      
+      const { error } = await supabase.from('user_profiles').upsert({
+          email: userEmail,
+          full_name: fullName
+      })
+
+      if (error) {
+          alert('エラーが発生しました: ' + error.message)
+      } else {
+          setUserName(fullName)
+          setShowProfileModal(false)
+          alert('氏名を登録しました！')
+      }
+  }
 
   useEffect(() => { if (userId) fetchApplicationStatus(userId, selectedDate) }, [selectedDate, userId])
 
@@ -173,32 +211,19 @@ export default function Home() {
     setDetails((prev: any) => { const next = { ...prev }; if (value === '') delete next[key]; else next[key] = value; return next })
   }
 
-  // ★修正: 保存処理のスマート化
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
-    
-    // 両方ロックなら何もしない
-    if (isSchedLocked && isAllowLocked) {
-        alert('勤務表・手当ともに申請済みのため、編集できません。')
-        return
-    }
-
+    if (isSchedLocked && isAllowLocked) { alert('勤務表・手当ともに申請済みのため、編集できません。'); return }
     const dateStr = formatDate(selectedDate)
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
 
-    // --- 1. 勤務表の保存 (ロックされていなければ) ---
     if (!isSchedLocked) {
-        const scheduleData: any = { 
-            user_id: user.id, user_email: user.email, date: dateStr, 
-            work_pattern_code: selectedPattern, leave_annual: details['leave_annual'] || null 
-        };
+        const scheduleData: any = { user_id: user.id, user_email: user.email, date: dateStr, work_pattern_code: selectedPattern, leave_annual: details['leave_annual'] || null };
         LEAVE_ITEMS_TIME.forEach(item => { scheduleData[item.key] = details[item.key] || null })
         const { error: sErr } = await supabase.from('daily_schedules').upsert(scheduleData, { onConflict: 'user_id, date' })
         if (sErr) { alert('勤務表保存エラー: ' + sErr.message); return }
     }
-
-    // --- 2. 手当の保存 (ロックされていなければ) ---
     if (!isAllowLocked) {
         if (activityId) {
             await supabase.from('allowances').delete().eq('user_id', user.id).eq('date', dateStr)
@@ -207,22 +232,14 @@ export default function Home() {
             await supabase.from('allowances').delete().eq('user_id', user.id).eq('date', dateStr)
         }
     }
-
     fetchData(user.id); setIsRegistered(true); setOpenCategory(null)
-    
-    // メッセージの出し分け
     if (isSchedLocked) alert('手当のみ保存しました (勤務表は申請済)')
     else if (isAllowLocked) alert('勤務表のみ保存しました (手当は申請済)')
     else alert('保存しました')
   }
 
-  // ★修正: 一括登録は「勤務表」のみに関係するので、勤務表ロックのみチェック
   const handleBulkRegister = async () => {
-    if (getLockStatus(new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1)).schedule) { 
-        alert('勤務表が申請済みのため、一括登録はできません。')
-        return 
-    }
-    
+    if (getLockStatus(new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1)).schedule) { alert('勤務表が申請済みのため、一括登録はできません。'); return }
     if (!confirm(`${selectedDate.getMonth()+1}月の未入力日を、すべて「デフォルト勤務」として一括登録しますか？`)) return
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
@@ -238,7 +255,6 @@ export default function Home() {
     if (error) alert('エラー: ' + error.message); else { alert('完了しました！'); fetchData(user.id); router.refresh() }
   }
 
-  // 削除ボタン (手当のみ削除)
   const handleDelete = async (id: number, dateStr: string) => { 
     if (getLockStatus(new Date(dateStr)).allowance) { alert('手当が申請済みのため削除できません'); return }
     if (!window.confirm('削除しますか？')) return; 
@@ -249,18 +265,10 @@ export default function Home() {
   const handleSubmit = async (type: 'allowance' | 'schedule') => {
     const label = type === 'allowance' ? '手当' : '勤務表'
     if (!confirm(`${selectedDate.getMonth()+1}月分の【${label}】を確定して申請しますか？\n※申請すると、承認されるまで${label}項目の修正ができなくなります。`)) return
-    
     const ym = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, '0')}`
-    const { error } = await supabase.from('monthly_applications').upsert({
-        user_id: userId, year_month: ym, application_type: type, status: 'submitted', submitted_at: new Date().toISOString()
-    })
-
+    const { error } = await supabase.from('monthly_applications').upsert({ user_id: userId, year_month: ym, application_type: type, status: 'submitted', submitted_at: new Date().toISOString() })
     if (error) alert('申請エラー: ' + error.message)
-    else {
-        alert(`${label}を申請しました！`)
-        if (type === 'allowance') setAllowanceStatus('submitted')
-        else setScheduleStatus('submitted')
-    }
+    else { alert(`${label}を申請しました！`); if (type === 'allowance') setAllowanceStatus('submitted'); else setScheduleStatus('submitted') }
   }
 
   const handleLogout = async () => { await supabase.auth.signOut(); router.push('/login') }
@@ -290,8 +298,15 @@ export default function Home() {
        {isAdmin && <div className="bg-slate-800 text-white text-center py-3 text-sm font-bold shadow-md"><a href="/admin" className="underline hover:text-blue-300 transition">事務担当者ページへ</a></div>}
 
       <div className="bg-white px-6 py-4 rounded-b-3xl shadow-sm mb-6 sticky top-0 z-10">
-        <button onClick={handleLogout} className="absolute right-4 top-4 text-xs font-bold text-slate-400 bg-slate-100 px-3 py-2 rounded-full">ログアウト</button>
-        <div className="flex flex-col items-center mt-2">
+        <div className="absolute right-4 top-4 flex gap-2">
+            {/* ★氏名登録ボタン */}
+            <button onClick={() => setShowProfileModal(true)} className="text-xs font-bold text-slate-500 bg-slate-100 px-3 py-2 rounded-full border border-slate-200">
+                {userName ? `👤 ${userName}` : '⚙️ 氏名登録'}
+            </button>
+            <button onClick={handleLogout} className="text-xs font-bold text-slate-400 bg-slate-100 px-3 py-2 rounded-full border border-slate-200">ログアウト</button>
+        </div>
+
+        <div className="flex flex-col items-center mt-6">
           <div className="flex items-center gap-4 mb-2">
             <button onClick={handlePrevMonth} className="text-slate-400 p-2 text-xl font-bold">‹</button>
             <h2 className="text-sm text-slate-500 font-bold">{selectedDate.getFullYear()}年 {selectedDate.getMonth() + 1}月</h2>
@@ -300,7 +315,6 @@ export default function Home() {
           <h1 className="text-4xl font-extrabold text-slate-800">¥{calculateMonthTotal().toLocaleString()}</h1>
           
           <div className="mt-3 flex flex-col gap-2 items-center w-full">
-              {/* 手当ステータス */}
               <div className="flex items-center gap-2">
                   <span className="text-xs font-bold text-slate-500 w-12 text-right">手当:</span>
                   {allowanceStatus === 'approved' && <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-bold">🈴 承認済</span>}
@@ -308,8 +322,6 @@ export default function Home() {
                   {allowanceStatus === 'draft' && !isAllowLocked && <button onClick={() => handleSubmit('allowance')} className="text-xs font-bold text-white bg-blue-600 px-3 py-1 rounded-full hover:bg-blue-700 shadow-sm">💰 申請</button>}
                   {allowanceStatus === 'draft' && isAllowLocked && <span className="text-xs text-slate-400">締切済(ロック)</span>}
               </div>
-
-              {/* 勤務表ステータス */}
               <div className="flex items-center gap-2">
                   <span className="text-xs font-bold text-slate-500 w-12 text-right">勤務表:</span>
                   {scheduleStatus === 'approved' && <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-bold">🈴 承認済</span>}
@@ -317,7 +329,6 @@ export default function Home() {
                   {scheduleStatus === 'draft' && !isSchedLocked && <button onClick={() => handleSubmit('schedule')} className="text-xs font-bold text-white bg-green-600 px-3 py-1 rounded-full hover:bg-green-700 shadow-sm">⏰ 申請</button>}
                   {scheduleStatus === 'draft' && isSchedLocked && <span className="text-xs text-slate-400">締切済(ロック)</span>}
               </div>
-              
               {!isSchedLocked && <button onClick={handleBulkRegister} className="mt-1 text-xs text-slate-400 underline">一括登録はこちら</button>}
           </div>
         </div>
@@ -339,8 +350,7 @@ export default function Home() {
           </div>
 
           <form onSubmit={handleSave} className={`flex flex-col gap-4 ${isSchedLocked && isAllowLocked ? 'opacity-60 pointer-events-none' : ''}`}>
-            
-            {/* 1. 勤務表エリア (isSchedLockedで制御) */}
+            {/* 勤務表エリア */}
             <div className={`bg-white p-3 rounded-xl border ${isSchedLocked ? 'border-gray-200 opacity-60 pointer-events-none bg-gray-50' : 'border-slate-200'}`}>
               <label className="block text-xs font-bold text-black mb-1">勤務パターン {isSchedLocked && '(編集不可)'}</label>
               <div className="flex items-center gap-2">
@@ -368,7 +378,7 @@ export default function Home() {
 
             <hr className="border-slate-100" />
             
-            {/* 2. 手当エリア (isAllowLockedで制御) */}
+            {/* 手当エリア */}
             <div className={`${isAllowLocked ? 'opacity-60 pointer-events-none grayscale' : ''}`}>
                 <div>
                 <label className="block text-xs font-bold text-black mb-1">部活動 業務内容 {isAllowLocked && '(編集不可)'}</label>
@@ -412,6 +422,32 @@ export default function Home() {
             ))}
         </div>
       </div>
+
+      {/* ★氏名登録モーダル */}
+      {showProfileModal && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white p-6 rounded-2xl shadow-xl w-full max-w-sm">
+                  <h3 className="text-lg font-bold text-slate-800 mb-4">氏名登録</h3>
+                  <p className="text-xs text-slate-500 mb-4">帳票出力に使用する氏名を登録してください。<br/>自動的に姓と名の間に半角スペースが入ります。</p>
+                  
+                  <div className="flex gap-2 mb-4">
+                      <div className="flex-1">
+                          <label className="text-xs font-bold text-slate-500">姓 (Last Name)</label>
+                          <input type="text" value={inputLastName} onChange={(e) => setInputLastName(e.target.value)} placeholder="例: 羽黒" className="w-full p-3 rounded border border-slate-300 mt-1 font-bold text-black" />
+                      </div>
+                      <div className="flex-1">
+                          <label className="text-xs font-bold text-slate-500">名 (First Name)</label>
+                          <input type="text" value={inputFirstName} onChange={(e) => setInputFirstName(e.target.value)} placeholder="例: 太郎" className="w-full p-3 rounded border border-slate-300 mt-1 font-bold text-black" />
+                      </div>
+                  </div>
+                  
+                  <div className="flex gap-2">
+                      <button onClick={() => setShowProfileModal(false)} className="flex-1 py-3 rounded-xl bg-slate-100 text-slate-500 font-bold">キャンセル</button>
+                      <button onClick={handleSaveProfile} className="flex-1 py-3 rounded-xl bg-blue-600 text-white font-bold shadow">登録する</button>
+                  </div>
+              </div>
+          </div>
+      )}
     </div>
   )
 }
