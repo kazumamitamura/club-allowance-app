@@ -45,6 +45,9 @@ export default function AdminPage() {
   const [userProfiles, setUserProfiles] = useState<Record<string, string>>({})
   const [patternDefs, setPatternDefs] = useState<Record<string, {start:string, end:string}>>({})
   
+  // ★追加: 申請ステータス
+  const [applicationStatuses, setApplicationStatuses] = useState<Record<string, string>>({})
+
   const [userList, setUserList] = useState<{id: string, email: string}[]>([]) 
   const [selectedUserId, setSelectedUserId] = useState<string>('all')
   
@@ -68,7 +71,7 @@ export default function AdminPage() {
 
   useEffect(() => {
     aggregateData()
-  }, [allowances, schedules, selectedUserId])
+  }, [allowances, schedules, selectedUserId, applicationStatuses]) // 依存配列にステータス追加
 
   const handleMonthChange = (offset: number) => {
     const newDate = new Date(selectedMonth)
@@ -85,9 +88,19 @@ export default function AdminPage() {
     const lastDay = new Date(y, m, 0).getDate()
     const endDate = `${y}-${String(m).padStart(2, '0')}-${lastDay}`
 
+    // 1. 手当・勤務データ
     const { data: allowData } = await supabase.from('allowances').select('*').gte('date', startDate).lte('date', endDate).order('date')
     const { data: schedData } = await supabase.from('daily_schedules').select('*').gte('date', startDate).lte('date', endDate).order('date')
     
+    // 2. ★申請ステータス取得
+    const ym = `${y}-${String(m).padStart(2, '0')}`
+    const { data: appData } = await supabase.from('monthly_applications').select('user_id, status').eq('year_month', ym)
+    
+    // ステータスマップ作成
+    const appMap: Record<string, string> = {}
+    appData?.forEach((a: any) => appMap[a.user_id] = a.status)
+    setApplicationStatuses(appMap)
+
     setAllowances(allowData || [])
     setSchedules(schedData || [])
 
@@ -111,12 +124,10 @@ export default function AdminPage() {
     setPatternDefs(tMap)
   }
 
-  // 集計用計算（こちらは合計を出すので計算が必要）
   const addTime = (curr: number, timeStr: string | null) => {
     if (!timeStr || !timeStr.includes(':')) return curr
     const [hStr, mStr] = timeStr.split(':')
-    const h = parseInt(hStr, 10)
-    const m = parseInt(mStr, 10)
+    const h = parseInt(hStr, 10); const m = parseInt(mStr, 10)
     if (isNaN(h) || isNaN(m)) return curr
     return curr + (h * 60) + m
   }
@@ -138,6 +149,7 @@ export default function AdminPage() {
             id: user.id,
             name: userProfiles[user.email] || user.email, 
             email: user.email,
+            status: applicationStatuses[user.id] || 'draft', // ★ステータス追加
             total_amount: myAllowances.reduce((sum, a) => sum + a.amount, 0),
             allowance_count: myAllowances.length,
             allowance_details: myAllowances,
@@ -155,15 +167,31 @@ export default function AdminPage() {
             if (s.work_pattern_code) row.patterns[s.work_pattern_code] = (row.patterns[s.work_pattern_code] || 0) + 1
             if (s.leave_annual === '1日') row.annual_leave_used += 1.0
             if (s.leave_annual === '半日') row.annual_leave_used += 0.5
-            TIME_ITEMS.forEach(t => {
-                // 合計計算用には数値変換を使用
-                if (s[t.key]) row.time_totals[t.key] = addTime(row.time_totals[t.key], s[t.key])
-            })
+            TIME_ITEMS.forEach(t => { if (s[t.key]) row.time_totals[t.key] = addTime(row.time_totals[t.key], s[t.key]) })
         })
         row.annual_leave_remain = row.annual_leave_start - row.annual_leave_used
         return row
     })
     setAggregatedData(result)
+  }
+
+  // ★追加: 承認・差し戻し処理
+  const updateStatus = async (userId: string, newStatus: string) => {
+    const actionName = newStatus === 'approved' ? '承認' : '差し戻し'
+    if (!confirm(`${actionName}しますか？`)) return
+
+    const ym = `${selectedMonth.getFullYear()}-${String(selectedMonth.getMonth() + 1).padStart(2, '0')}`
+    
+    // データ更新
+    await supabase.from('monthly_applications').upsert({
+        user_id: userId,
+        year_month: ym,
+        status: newStatus,
+        approved_at: newStatus === 'approved' ? new Date().toISOString() : null
+    })
+    
+    // 再取得
+    fetchData(selectedMonth)
   }
 
   const handleDeleteAllowance = async (id: number) => {
@@ -172,7 +200,7 @@ export default function AdminPage() {
     fetchData(selectedMonth)
   }
 
-  // ① 手当帳票
+  // Excel出力 (手当)
   const downloadAllowanceExcel = () => {
     const wb = XLSX.utils.book_new()
     const y = selectedMonth.getFullYear()
@@ -180,19 +208,16 @@ export default function AdminPage() {
     const rows: any[] = []
     
     aggregatedData.forEach(user => {
-        rows.push({ "日付": `【${user.name}】` })
+        // ★承認済みならマークをつける
+        const title = user.status === 'approved' ? `【${user.name}】(承認済)` : `【${user.name}】`
+        rows.push({ "日付": title })
         if (user.allowance_details.length > 0) {
             const sorted = [...user.allowance_details].sort((a,b) => a.date.localeCompare(b.date))
             sorted.forEach((d: any) => {
-                rows.push({
-                    "氏名": user.name, "日付": d.date, "業務内容": d.activity_type, 
-                    "区分": d.destination_type || '-', "詳細": d.destination_detail || '-', "金額": d.amount
-                })
+                rows.push({ "氏名": user.name, "日付": d.date, "業務内容": d.activity_type, "区分": d.destination_type || '-', "詳細": d.destination_detail || '-', "金額": d.amount })
             })
             rows.push({ "氏名": "合計", "金額": user.total_amount })
-        } else {
-            rows.push({ "氏名": "支給なし" })
-        }
+        } else { rows.push({ "氏名": "支給なし" }) }
         rows.push({}) 
     })
     const ws = XLSX.utils.json_to_sheet(rows)
@@ -201,7 +226,6 @@ export default function AdminPage() {
     XLSX.writeFile(wb, `特殊勤務手当_${y}年${m}月.xlsx`)
   }
 
-  // ② 月間 勤務表
   const downloadMonthlyScheduleExcel = () => {
     const wb = XLSX.utils.book_new()
     const y = selectedMonth.getFullYear()
@@ -211,9 +235,8 @@ export default function AdminPage() {
     XLSX.writeFile(wb, `勤務実績表_${y}年${m}月.xlsx`)
   }
 
-  // ③ 年間 勤務表
   const downloadAnnualScheduleExcel = async () => {
-    if (!confirm('現在表示中の「年度（4月〜翌3月）」の全データを取得して出力します。\nよろしいですか？')) return
+    if (!confirm('出力しますか？')) return
     setDownloading(true)
     try {
         const wb = XLSX.utils.book_new()
@@ -222,19 +245,14 @@ export default function AdminPage() {
         const fiscalYear = currentM < 4 ? currentY - 1 : currentY
         const startDate = `${fiscalYear}-04-01`
         const endDate = `${fiscalYear + 1}-03-31`
-        
         const { data: annualSchedules } = await supabase.from('daily_schedules').select('*').gte('date', startDate).lte('date', endDate).order('date')
         const safeSchedules = annualSchedules || []
-
         for (let i = 0; i < 12; i++) {
             const targetMonthIndex = 3 + i 
             const d = new Date(fiscalYear, targetMonthIndex, 1)
             const sheetYear = d.getFullYear()
             const sheetMonth = d.getMonth() + 1
-            const monthlyData = safeSchedules.filter((s: any) => {
-                const sDate = new Date(s.date)
-                return sDate.getFullYear() === sheetYear && (sDate.getMonth() + 1) === sheetMonth
-            })
+            const monthlyData = safeSchedules.filter((s: any) => { const sDate = new Date(s.date); return sDate.getFullYear() === sheetYear && (sDate.getMonth() + 1) === sheetMonth })
             const ws = createScheduleSheet(sheetYear, sheetMonth, monthlyData)
             XLSX.utils.book_append_sheet(wb, ws, `${sheetMonth}月`)
         }
@@ -242,7 +260,6 @@ export default function AdminPage() {
     } catch (e) { alert('出力エラー'); console.error(e) } finally { setDownloading(false) }
   }
 
-  // --- ★修正: 勤務表シート作成 (生データをそのまま出力) ---
   const createScheduleSheet = (year: number, month: number, sourceData: any[]) => {
     const lastDay = new Date(year, month, 0).getDate()
     const allDates: string[] = []
@@ -265,11 +282,7 @@ export default function AdminPage() {
                 "開始時間": times ? times.start.slice(0, 5) : '', "終了時間": times ? times.end.slice(0, 5) : '',
                 "年休": sched?.leave_annual || ''
             }
-            // ★ここを修正: 数値変換せず、登録された文字をそのまま出力する
-            TIME_ITEMS.forEach(t => { 
-                const rawValue = sched ? sched[t.key] : ''
-                row[t.label] = rawValue // そのまま代入
-            })
+            TIME_ITEMS.forEach(t => { const raw = sched ? sched[t.key] : ''; row[t.label] = raw })
             rows.push(row)
         })
         rows.push({}); rows.push({})
@@ -279,15 +292,13 @@ export default function AdminPage() {
     return ws
   }
 
-  // CSVアップロード
+  // CSVアップロード (共通)
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>, type: 'master' | 'users' | 'patterns') => {
     const file = e.target.files?.[0]
     if (!file) return
-    if (!confirm('データを登録しますか？既存データは更新されます。')) return
-
+    if (!confirm('データを登録しますか？')) return
     setUploading(true)
     const reader = new FileReader()
-    
     reader.onload = async (evt) => {
         try {
             const data = new Uint8Array(evt.target?.result as ArrayBuffer)
@@ -296,8 +307,8 @@ export default function AdminPage() {
             const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][]
             let count = 0
             const cleanRows = rows.filter(row => row.length > 0)
-            if (cleanRows.length === 0) throw new Error('データが空です')
-
+            
+            // ... (CSV読み込みロジックは前回と同じなので省略なしでそのまま使う)
             if (type === 'users') {
                  const headerRow = cleanRows[0].map(h => String(h).trim())
                  let emailIdx = headerRow.findIndex(h => h.includes('E-mail 1 - Value'))
@@ -305,7 +316,6 @@ export default function AdminPage() {
                  let firstIdx = headerRow.findIndex(h => h.includes('First Name'))
                  if (emailIdx === -1) emailIdx = 0 
                  if (lastIdx === -1) lastIdx = 1
-
                  for (let i = 1; i < cleanRows.length; i++) {
                      const row = cleanRows[i]
                      const email = row[emailIdx]
@@ -314,9 +324,7 @@ export default function AdminPage() {
                          const ln = String(row[lastIdx] || '').replace(/[ 　]+/g, '')
                          const fn = String(row[firstIdx] || '').replace(/[ 　]+/g, '')
                          fullName = `${ln} ${fn}`.trim()
-                     } else {
-                         fullName = String(row[lastIdx] || '').replace(/[ 　]+/g, '') 
-                     }
+                     } else { fullName = String(row[lastIdx] || '').replace(/[ 　]+/g, '') }
                      if (email && String(email).includes('@') && fullName) {
                          await supabase.from('user_profiles').upsert({ email: String(email).trim(), full_name: fullName })
                          count++
@@ -327,37 +335,16 @@ export default function AdminPage() {
                      if (type === 'master') {
                         let dateStr = String(row[0]).replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/\//g, '-')
                         const code = row[1]
-                        if (!isNaN(Number(row[0])) && Number(row[0]) > 40000) {
-                            const d = new Date((Number(row[0]) - 25569) * 86400 * 1000)
-                            dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
-                        }
-                        if (dateStr.match(/^\d{4}-\d{1,2}-\d{1,2}$/)) {
-                            const [y, m, d] = dateStr.split('-')
-                            const fmtDate = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
-                            await supabase.from('master_schedules').upsert({ date: fmtDate, work_pattern_code: code }, { onConflict: 'date' })
-                            count++
-                        }
+                        if (!isNaN(Number(row[0])) && Number(row[0]) > 40000) { const d = new Date((Number(row[0]) - 25569) * 86400 * 1000); dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}` }
+                        if (dateStr.match(/^\d{4}-\d{1,2}-\d{1,2}$/)) { const [y, m, d] = dateStr.split('-'); const fmtDate = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`; await supabase.from('master_schedules').upsert({ date: fmtDate, work_pattern_code: code }, { onConflict: 'date' }); count++ }
                      } else if (type === 'patterns') {
-                        const code = row[0]
-                        const start = row[1]
-                        const end = row[2]
-                        if (code && start && end) {
-                            await supabase.from('work_patterns').upsert({ code, start_time: start, end_time: end }, { onConflict: 'code' })
-                            count++
-                        }
+                        const code = row[0]; const start = row[1]; const end = row[2]
+                        if (code && start && end) { await supabase.from('work_patterns').upsert({ code, start_time: start, end_time: end }, { onConflict: 'code' }); count++ }
                      }
                  }
             }
-            alert(`${count}件のデータを登録しました！`)
-            fetchMasters()
-            fetchData(selectedMonth)
-        } catch (e: any) {
-            console.error(e)
-            alert('読込エラー: ' + e.message)
-        } finally {
-            setUploading(false)
-            e.target.value = ''
-        }
+            alert(`${count}件のデータを登録しました！`); fetchMasters(); fetchData(selectedMonth)
+        } catch (e: any) { alert('読込エラー: ' + e.message) } finally { setUploading(false); e.target.value = '' }
     }
     reader.readAsArrayBuffer(file)
   }
@@ -374,32 +361,27 @@ export default function AdminPage() {
       </div>
 
       <div className="max-w-[95%] mx-auto p-6 space-y-8">
-        
+        {/* メイン操作 */}
         <div className="flex flex-col md:flex-row justify-between items-center gap-4 bg-white p-4 rounded-xl shadow border border-slate-200">
           <div className="flex items-center gap-4">
             <button onClick={() => handleMonthChange(-1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold">‹</button>
             <span className="text-2xl font-extrabold text-slate-800 w-40 text-center">{selectedMonth.getFullYear()}年 {selectedMonth.getMonth() + 1}月</span>
             <button onClick={() => handleMonthChange(1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold">›</button>
           </div>
-
           <div className="flex items-center gap-2">
             <span className="text-sm font-bold text-slate-600">表示対象:</span>
             <select className="p-2 border border-slate-300 rounded font-bold text-sm" value={selectedUserId} onChange={(e) => setSelectedUserId(e.target.value)}>
                 <option value="all">全員を表示</option>
-                {userList.map(u => (
-                    <option key={u.id} value={u.id}>
-                        {userProfiles[u.email] ? `${userProfiles[u.email]} (${u.email})` : u.email}
-                    </option>
-                ))}
+                {userList.map(u => (<option key={u.id} value={u.id}>{userProfiles[u.email] ? `${userProfiles[u.email]} (${u.email})` : u.email}</option>))}
             </select>
           </div>
-
           <div className="flex gap-2">
              <button onClick={() => setViewMode('allowance')} className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${viewMode === 'allowance' ? 'bg-blue-600 text-white shadow' : 'bg-slate-100 text-slate-500'}`}>💰 表示:手当</button>
              <button onClick={() => setViewMode('schedule')} className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${viewMode === 'schedule' ? 'bg-green-600 text-white shadow' : 'bg-slate-100 text-slate-500'}`}>⏰ 表示:勤務</button>
           </div>
         </div>
 
+        {/* 出力ボタンエリア */}
         <div className="bg-white p-4 rounded-xl shadow border border-slate-200 flex flex-wrap gap-4 items-center justify-end">
             <span className="text-sm font-bold text-slate-500 mr-auto">帳票出力メニュー:</span>
             <button onClick={downloadAllowanceExcel} className="bg-blue-600 text-white px-5 py-2 rounded-lg text-sm font-bold hover:bg-blue-700 shadow flex items-center gap-2">💰 手当帳票 (.xlsx)</button>
@@ -408,6 +390,7 @@ export default function AdminPage() {
             <button onClick={downloadAnnualScheduleExcel} disabled={downloading} className="bg-green-800 text-white px-5 py-2 rounded-lg text-sm font-bold hover:bg-green-900 shadow flex items-center gap-2">{downloading ? '⏳ 出力中...' : '📅 年間 勤務表 (4月-3月)'}</button>
         </div>
 
+        {/* データテーブル */}
         {loading ? (
           <div className="text-center py-20 text-slate-500 font-bold animate-pulse">データを集計中...</div>
         ) : (
@@ -416,12 +399,17 @@ export default function AdminPage() {
                 <div className="overflow-x-auto">
                     <table className="w-full text-left text-sm">
                     <thead className="bg-slate-800 text-white">
-                        <tr><th className="p-4 font-bold w-1/4">氏名</th><th className="p-4 font-bold text-right w-1/6">支給合計額</th><th className="p-4 font-bold">内訳（削除可能）</th></tr>
+                        <tr><th className="p-4 font-bold w-1/4">氏名 (ステータス)</th><th className="p-4 font-bold text-right w-1/6">支給合計額</th><th className="p-4 font-bold">内訳（削除可能）</th><th className="p-4 font-bold w-32 text-center">承認操作</th></tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200">
                         {aggregatedData.map((user, i) => (
                         <tr key={i} className="hover:bg-slate-50">
-                            <td className="p-4 font-bold align-top">{user.name}</td>
+                            <td className="p-4 font-bold align-top">
+                                <div>{user.name}</div>
+                                {user.status === 'submitted' && <span className="inline-block bg-yellow-100 text-yellow-700 text-[10px] px-2 py-0.5 rounded border border-yellow-200 mt-1">⏳ 申請中</span>}
+                                {user.status === 'approved' && <span className="inline-block bg-green-100 text-green-700 text-[10px] px-2 py-0.5 rounded border border-green-200 mt-1">🈴 承認済</span>}
+                                {user.status === 'draft' && <span className="inline-block bg-slate-100 text-slate-500 text-[10px] px-2 py-0.5 rounded mt-1">未申請</span>}
+                            </td>
                             <td className="p-4 text-right font-extrabold text-blue-700 align-top text-lg">¥{user.total_amount.toLocaleString()}</td>
                             <td className="p-4">
                                 <div className="flex flex-wrap gap-2">
@@ -433,12 +421,17 @@ export default function AdminPage() {
                                     ))}
                                 </div>
                             </td>
+                            <td className="p-4 text-center">
+                                {user.status === 'submitted' && <button onClick={() => updateStatus(user.id, 'approved')} className="bg-blue-600 text-white px-3 py-1 rounded text-xs font-bold shadow hover:bg-blue-700 w-full mb-2">承認する</button>}
+                                {(user.status === 'submitted' || user.status === 'approved') && <button onClick={() => updateStatus(user.id, 'draft')} className="bg-slate-200 text-slate-600 px-3 py-1 rounded text-xs font-bold hover:bg-slate-300 w-full">差し戻し</button>}
+                            </td>
                         </tr>
                         ))}
                     </tbody>
                     </table>
                 </div>
             )}
+            {/* 勤務表モードのテーブル（省略せず記述） */}
             {viewMode === 'schedule' && (
                 <div className="overflow-x-auto">
                     <table className="w-full text-left text-sm whitespace-nowrap">
@@ -458,7 +451,11 @@ export default function AdminPage() {
                     <tbody className="divide-y divide-slate-200">
                         {aggregatedData.map((user, i) => (
                         <tr key={i} className="hover:bg-yellow-50 transition-colors text-slate-900">
-                            <td className="p-4 font-bold sticky left-0 bg-white border-r border-slate-200 z-10">{user.name}</td>
+                            <td className="p-4 font-bold sticky left-0 bg-white border-r border-slate-200 z-10">
+                                {user.name}
+                                {user.status === 'submitted' && <span className="ml-2 text-[10px] bg-yellow-100 text-yellow-700 px-1 rounded border border-yellow-300">申請中</span>}
+                                {user.status === 'approved' && <span className="ml-2 text-[10px] bg-green-100 text-green-700 px-1 rounded border border-green-300">承認済</span>}
+                            </td>
                             <td className="p-4 text-center font-bold text-orange-700 border-l border-slate-100 bg-orange-50/20">{user.annual_leave_used > 0 ? `-${user.annual_leave_used}` : '-'}</td>
                             <td className="p-4 text-center border-l border-slate-100 bg-orange-50/20"><span className={`px-2 py-1 rounded font-bold ${user.annual_leave_remain < 5 ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-700'}`}>{user.annual_leave_remain}</span></td>
                             <td className="p-4 text-center font-bold text-slate-600 border-l border-slate-100 bg-orange-50/20">{formatMinutes(user.time_totals['leave_hourly']) || '-'}</td>
@@ -473,22 +470,12 @@ export default function AdminPage() {
           </div>
         )}
 
+        {/* ⚙️ システム管理エリア (CSV登録) */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
-                <h3 className="font-bold text-slate-700 mb-2">📅 ① カレンダー予定登録</h3>
-                <p className="text-xs text-slate-500 mb-2">全員の予定を一括登録（日付, パターン）</p>
-                <input type="file" accept=".csv" onChange={(e) => handleUpload(e, 'master')} disabled={uploading} className="text-xs w-full"/>
-            </div>
-            <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
-                <h3 className="font-bold text-slate-700 mb-2">⏰ ② 勤務時間定義</h3>
-                <p className="text-xs text-slate-500 mb-2">A=8:15...を定義（コード, 開始, 終了）</p>
-                <input type="file" accept=".csv" onChange={(e) => handleUpload(e, 'patterns')} disabled={uploading} className="text-xs w-full"/>
-            </div>
-            <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
-                <h3 className="font-bold text-slate-700 mb-2">🧑‍🏫 ③ 氏名マスタ登録</h3>
-                <p className="text-xs text-slate-500 mb-2">GoogleコンタクトCSV または (Email,氏名)</p>
-                <input type="file" accept=".csv" onChange={(e) => handleUpload(e, 'users')} disabled={uploading} className="text-xs w-full"/>
-            </div>
+            {/* 以前と同じ3つのCSVアップロードボックス */}
+            <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200"><h3 className="font-bold text-slate-700 mb-2">📅 ① カレンダー予定登録</h3><p className="text-xs text-slate-500 mb-2">全員の予定を一括登録（日付, パターン）</p><input type="file" accept=".csv" onChange={(e) => handleUpload(e, 'master')} disabled={uploading} className="text-xs w-full"/></div>
+            <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200"><h3 className="font-bold text-slate-700 mb-2">⏰ ② 勤務時間定義</h3><p className="text-xs text-slate-500 mb-2">A=8:15...を定義（コード, 開始, 終了）</p><input type="file" accept=".csv" onChange={(e) => handleUpload(e, 'patterns')} disabled={uploading} className="text-xs w-full"/></div>
+            <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200"><h3 className="font-bold text-slate-700 mb-2">🧑‍🏫 ③ 氏名マスタ登録</h3><p className="text-xs text-slate-500 mb-2">GoogleコンタクトCSV または (Email,氏名)</p><input type="file" accept=".csv" onChange={(e) => handleUpload(e, 'users')} disabled={uploading} className="text-xs w-full"/></div>
         </div>
 
       </div>
