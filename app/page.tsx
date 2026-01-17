@@ -48,8 +48,9 @@ export default function Home() {
   const [masterSchedules, setMasterSchedules] = useState<MasterSchedule[]>([]) 
   const [workPatterns, setWorkPatterns] = useState<WorkPattern[]>([])
   
-  // ★追加: 申請ステータス
-  const [applicationStatus, setApplicationStatus] = useState<'draft' | 'submitted' | 'approved'>('draft')
+  // ★変更: 2つのステータス管理
+  const [allowanceStatus, setAllowanceStatus] = useState<'draft' | 'submitted' | 'approved'>('draft')
+  const [scheduleStatus, setScheduleStatus] = useState<'draft' | 'submitted' | 'approved'>('draft')
   
   const [selectedDate, setSelectedDate] = useState<Date>(new Date())
   const [dayType, setDayType] = useState<string>('---')
@@ -66,22 +67,21 @@ export default function Home() {
   const [isAccommodation, setIsAccommodation] = useState(false)
   const [calculatedAmount, setCalculatedAmount] = useState(0)
 
-  // 編集ロック判定 (翌月5日以降 OR 申請済みならロック)
+  // ロック判定：どちらか一方でも申請済みなら編集ロック（安全運用）
   const isLocked = (targetDate: Date) => {
-    if (isAdmin) return false // 管理者は無敵
+    if (isAdmin) return false 
     
-    // 1. 締め日チェック
     const now = new Date()
     const deadline = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 6, 0, 0, 0)
     if (now >= deadline) return true
 
-    // 2. 申請済みチェック (表示中の月が申請済みか)
-    // カレンダーで選んでいる日が、申請済みの月に含まれるか確認
     const currentViewMonth = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, '0')}`
     const targetMonth = `${targetDate.getFullYear()}-${String(targetDate.getMonth() + 1).padStart(2, '0')}`
     
-    // 今表示している月が申請済みならロック
-    if (currentViewMonth === targetMonth && applicationStatus !== 'draft') return true
+    // 表示中の月が、手当または勤務表どちらかでも申請済みならロック
+    if (currentViewMonth === targetMonth) {
+        if (allowanceStatus !== 'draft' || scheduleStatus !== 'draft') return true
+    }
 
     return false
   }
@@ -90,26 +90,20 @@ export default function Home() {
     const init = async () => {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) { router.push('/login'); return }
-      
       setUserEmail(user.email || '')
       setUserId(user.id)
       if (ADMIN_EMAILS.includes(user.email?.toLowerCase() || '')) setIsAdmin(true)
-
       fetchData(user.id)
       fetchSchoolCalendar()
       fetchMasterSchedules()
       fetchApplicationStatus(user.id, selectedDate)
-      
       const { data } = await supabase.from('work_patterns').select('*').order('code')
       if (data) setWorkPatterns(data)
     }
     init()
   }, [])
 
-  // 月が変わったら申請状況を再確認
-  useEffect(() => {
-    if (userId) fetchApplicationStatus(userId, selectedDate)
-  }, [selectedDate, userId])
+  useEffect(() => { if (userId) fetchApplicationStatus(userId, selectedDate) }, [selectedDate, userId])
 
   const fetchData = async (uid: string) => {
     const { data: allowData } = await supabase.from('allowances').select('*').eq('user_id', uid).order('date', { ascending: false })
@@ -125,11 +119,16 @@ export default function Home() {
     const { data } = await supabase.from('master_schedules').select('*'); setMasterSchedules(data || [])
   }
 
-  // ★追加: 申請状況の取得
+  // ★変更: 2種類のステータスを取得
   const fetchApplicationStatus = async (uid: string, date: Date) => {
     const ym = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
-    const { data } = await supabase.from('monthly_applications').select('status').eq('user_id', uid).eq('year_month', ym).single()
-    setApplicationStatus(data?.status || 'draft')
+    const { data } = await supabase.from('monthly_applications').select('application_type, status').eq('user_id', uid).eq('year_month', ym)
+    
+    const allow = data?.find(d => d.application_type === 'allowance')
+    const sched = data?.find(d => d.application_type === 'schedule')
+    
+    setAllowanceStatus(allow?.status || 'draft')
+    setScheduleStatus(sched?.status || 'draft')
   }
 
   useEffect(() => {
@@ -138,10 +137,8 @@ export default function Home() {
       const calData = schoolCalendar.find(c => c.date === dateStr)
       const type = calData?.day_type || (selectedDate.getDay() % 6 === 0 ? '休日(仮)' : '勤務日(仮)')
       setDayType(type)
-      
       const masterSchedule = masterSchedules.find(m => m.date === dateStr)
       const defaultPattern = masterSchedule?.work_pattern_code || (type.includes('休日') || type.includes('週休') ? '' : 'C')
-
       const scheduleData = schedules.find(s => s.date === dateStr)
       if (scheduleData) {
         setIsRegistered(true)
@@ -151,18 +148,14 @@ export default function Home() {
         LEAVE_ITEMS_TIME.forEach(i => { if (scheduleData[i.key]) newDetails[i.key] = scheduleData[i.key] })
         setDetails(newDetails)
       } else {
-        setIsRegistered(false)
-        setSelectedPattern(defaultPattern)
-        setDetails({})
+        setIsRegistered(false); setSelectedPattern(defaultPattern); setDetails({})
       }
-
       const allowance = allowances.find(a => a.date === dateStr)
       if (allowance) {
         setActivityId(allowance.activity_type === allowance.activity_type ? (ACTIVITY_TYPES.find(t => t.label === allowance.activity_type)?.id || allowance.activity_type) : '')
         setDestinationId(DESTINATIONS.find(d => d.label === allowance.destination_type)?.id || 'school')
         setDestinationDetail(allowance.destination_detail || '')
-        setIsDriving(allowance.is_driving)
-        setIsAccommodation(allowance.is_accommodation)
+        setIsDriving(allowance.is_driving); setIsAccommodation(allowance.is_accommodation)
       } else {
         setActivityId(''); setDestinationId('school'); setDestinationDetail(''); setIsDriving(false); setIsAccommodation(false)
       }
@@ -183,7 +176,7 @@ export default function Home() {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (isLocked(selectedDate)) { alert('ロックされているため編集できません'); return }
+    if (isLocked(selectedDate)) { alert('申請済み、または締め日を過ぎているため編集できません'); return }
 
     const dateStr = formatDate(selectedDate)
     const { data: { user } } = await supabase.auth.getUser()
@@ -231,23 +224,25 @@ export default function Home() {
     if (!error) fetchData(userId)
   }
   
-  // ★追加: 申請実行処理
-  const handleSubmitApplication = async () => {
-    if (!confirm(`${selectedDate.getMonth()+1}月分の勤務・手当を確定して申請しますか？\n\n※ 申請後は編集できなくなります。`)) return
+  // ★追加: 申請処理 (type別)
+  const handleSubmit = async (type: 'allowance' | 'schedule') => {
+    const label = type === 'allowance' ? '手当' : '勤務表'
+    if (!confirm(`${selectedDate.getMonth()+1}月分の【${label}】を確定して申請しますか？\n※申請すると、承認されるまで修正できなくなります。`)) return
     
     const ym = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, '0')}`
     const { error } = await supabase.from('monthly_applications').upsert({
         user_id: userId,
-        user_email: userEmail,
         year_month: ym,
+        application_type: type,
         status: 'submitted',
         submitted_at: new Date().toISOString()
     })
 
     if (error) alert('申請エラー: ' + error.message)
     else {
-        alert('申請しました！管理者の承認をお待ちください。')
-        setApplicationStatus('submitted')
+        alert(`${label}を申請しました！`)
+        if (type === 'allowance') setAllowanceStatus('submitted')
+        else setScheduleStatus('submitted')
     }
   }
 
@@ -289,16 +284,31 @@ export default function Home() {
           </div>
           <h1 className="text-4xl font-extrabold text-slate-800">¥{calculateMonthTotal().toLocaleString()}</h1>
           
-          {/* ★ステータス表示 & 申請ボタン */}
-          <div className="mt-2 text-center">
-              {applicationStatus === 'approved' && <span className="inline-block bg-green-100 text-green-700 px-3 py-1 rounded-full text-xs font-bold border border-green-200">🈴 承認済み</span>}
-              {applicationStatus === 'submitted' && <span className="inline-block bg-yellow-100 text-yellow-700 px-3 py-1 rounded-full text-xs font-bold border border-yellow-200">⏳ 申請中 (編集ロック)</span>}
-              {applicationStatus === 'draft' && !isCurrentLocked && (
-                  <div className="flex gap-2 justify-center">
-                      <button onClick={handleBulkRegister} className="text-xs font-bold text-blue-600 bg-blue-50 px-4 py-2 rounded-full border border-blue-200 hover:bg-blue-100 shadow-sm">📋 一括登録</button>
-                      <button onClick={handleSubmitApplication} className="text-xs font-bold text-white bg-green-600 px-4 py-2 rounded-full hover:bg-green-700 shadow-sm">🚀 確定申請</button>
-                  </div>
-              )}
+          {/* ★修正: 2つの申請ボタンとステータス */}
+          <div className="mt-3 flex flex-col gap-2 items-center w-full">
+              {/* 手当ステータス */}
+              <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-slate-500 w-12 text-right">手当:</span>
+                  {allowanceStatus === 'approved' && <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-bold">🈴 承認済</span>}
+                  {allowanceStatus === 'submitted' && <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded text-xs font-bold">⏳ 申請中</span>}
+                  {allowanceStatus === 'draft' && !isCurrentLocked && (
+                      <button onClick={() => handleSubmit('allowance')} className="text-xs font-bold text-white bg-blue-600 px-3 py-1 rounded-full hover:bg-blue-700 shadow-sm">💰 申請</button>
+                  )}
+                  {allowanceStatus === 'draft' && isCurrentLocked && <span className="text-xs text-slate-400">未申請(ロック)</span>}
+              </div>
+
+              {/* 勤務表ステータス */}
+              <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-slate-500 w-12 text-right">勤務表:</span>
+                  {scheduleStatus === 'approved' && <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-bold">🈴 承認済</span>}
+                  {scheduleStatus === 'submitted' && <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded text-xs font-bold">⏳ 申請中</span>}
+                  {scheduleStatus === 'draft' && !isCurrentLocked && (
+                      <button onClick={() => handleSubmit('schedule')} className="text-xs font-bold text-white bg-green-600 px-3 py-1 rounded-full hover:bg-green-700 shadow-sm">⏰ 申請</button>
+                  )}
+                  {scheduleStatus === 'draft' && isCurrentLocked && <span className="text-xs text-slate-400">未申請(ロック)</span>}
+              </div>
+              
+              {!isCurrentLocked && <button onClick={handleBulkRegister} className="mt-1 text-xs text-slate-400 underline">一括登録はこちら</button>}
           </div>
         </div>
       </div>
