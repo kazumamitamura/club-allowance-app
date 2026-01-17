@@ -264,7 +264,7 @@ export default function AdminPage() {
     return ws
   }
 
-  // ★修正: GoogleコンタクトCSV対応のアップロード機能（全角スペース除去版）
+  // ★修正: 最強のCSVリーダー（Googleコンタクト対応・文字化け回避・スペース除去）
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>, type: 'master' | 'users' | 'patterns') => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -274,84 +274,94 @@ export default function AdminPage() {
     const reader = new FileReader()
     
     reader.onload = async (evt) => {
-        const data = new Uint8Array(evt.target?.result as ArrayBuffer)
-        const wb = XLSX.read(data, { type: 'array' })
-        const sheet = wb.Sheets[wb.SheetNames[0]]
-        const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][]
-        let count = 0
+        try {
+            const data = new Uint8Array(evt.target?.result as ArrayBuffer)
+            // XLSXライブラリで解析（文字コード自動判定）
+            const wb = XLSX.read(data, { type: 'array' })
+            const sheet = wb.Sheets[wb.SheetNames[0]]
+            // ヘッダー行も含めて2次元配列で取得
+            const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][]
+            let count = 0
 
-        const cleanRows = rows.filter(row => row.length > 0)
+            // 空行を除去
+            const cleanRows = rows.filter(row => row.length > 0)
+            if (cleanRows.length === 0) throw new Error('データが空です')
 
-        if (type === 'users') {
-             // ヘッダー行を探す
-             const headerRow = cleanRows[0].map(h => String(h).trim())
-             const emailIdx = headerRow.indexOf('E-mail 1 - Value')
-             const lastIdx = headerRow.indexOf('Last Name')
-             const firstIdx = headerRow.indexOf('First Name')
+            if (type === 'users') {
+                 // ヘッダー行を検索（BOM対策で文字列を含んでいるかチェック）
+                 const headerRow = cleanRows[0].map(h => String(h).trim())
+                 
+                 // Googleコンタクトのカラムを探す
+                 let emailIdx = headerRow.findIndex(h => h.includes('E-mail 1 - Value'))
+                 let lastIdx = headerRow.findIndex(h => h.includes('Last Name'))
+                 let firstIdx = headerRow.findIndex(h => h.includes('First Name'))
 
-             if (emailIdx !== -1 && lastIdx !== -1) {
-                 // ★Googleコンタクト形式
+                 // 見つからない場合は通常CSVのカラムを探す (Email, 氏名)
+                 if (emailIdx === -1) emailIdx = 0 
+                 if (lastIdx === -1) lastIdx = 1
+
                  for (let i = 1; i < cleanRows.length; i++) {
                      const row = cleanRows[i]
                      const email = row[emailIdx]
                      
-                     // ★修正ポイント: 全角・半角スペースを除去してから結合
-                     let lastName = String(row[lastIdx] || '').replace(/[ 　]+/g, '')
-                     let firstName = String(row[firstIdx] || '').replace(/[ 　]+/g, '')
+                     // 名前結合ロジック（全角スペース除去）
+                     let fullName = ''
+                     if (lastIdx !== -1 && firstIdx !== -1) {
+                         // Google形式 (姓 + 名)
+                         const ln = String(row[lastIdx] || '').replace(/[ 　]+/g, '')
+                         const fn = String(row[firstIdx] || '').replace(/[ 　]+/g, '')
+                         fullName = `${ln} ${fn}`.trim()
+                     } else {
+                         // 通常形式 (氏名)
+                         fullName = String(row[lastIdx] || '').replace(/[ 　]+/g, '') // 名字カラムを氏名として使う
+                     }
                      
-                     // 姓 + 半角スペース + 名
-                     const fullName = `${lastName} ${firstName}`.trim()
-                     
-                     if (email && String(email).includes('@')) {
-                         await supabase.from('user_profiles').upsert({ email, full_name: fullName })
+                     if (email && String(email).includes('@') && fullName) {
+                         await supabase.from('user_profiles').upsert({ email: String(email).trim(), full_name: fullName })
                          count++
                      }
                  }
-             } else {
-                 // ★通常CSV形式 (Email, 氏名)
+
+            } else {
+                 // master, patterns
                  for (const row of cleanRows) {
-                    const email = row[0]
-                    const name = row[1]
-                    if (email && String(email).includes('@')) {
-                        await supabase.from('user_profiles').upsert({ email, full_name: name })
-                        count++
-                    }
+                     if (type === 'master') {
+                        let dateStr = String(row[0]).replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/\//g, '-')
+                        const code = row[1]
+                        // シリアル値対応
+                        if (!isNaN(Number(row[0])) && Number(row[0]) > 40000) {
+                            const d = new Date((Number(row[0]) - 25569) * 86400 * 1000)
+                            dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+                        }
+                        if (dateStr.match(/^\d{4}-\d{1,2}-\d{1,2}$/)) {
+                            const [y, m, d] = dateStr.split('-')
+                            const fmtDate = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
+                            await supabase.from('master_schedules').upsert({ date: fmtDate, work_pattern_code: code }, { onConflict: 'date' })
+                            count++
+                        }
+                     } else if (type === 'patterns') {
+                        const code = row[0]
+                        const start = row[1]
+                        const end = row[2]
+                        if (code && start && end) {
+                            await supabase.from('work_patterns').upsert({ code, start_time: start, end_time: end }, { onConflict: 'code' })
+                            count++
+                        }
+                     }
                  }
-             }
+            }
 
-        } else {
-             // 他のCSVタイプ
-             for (const row of cleanRows) {
-                 if (type === 'master') {
-                    let dateStr = String(row[0]).replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/\//g, '-')
-                    const code = row[1]
-                    if (!isNaN(Number(row[0])) && Number(row[0]) > 40000) {
-                        const d = new Date((Number(row[0]) - 25569) * 86400 * 1000)
-                        dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
-                    }
-                    if (dateStr.match(/^\d{4}-\d{1,2}-\d{1,2}$/)) {
-                        const [y, m, d] = dateStr.split('-')
-                        const fmtDate = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`
-                        await supabase.from('master_schedules').upsert({ date: fmtDate, work_pattern_code: code }, { onConflict: 'date' })
-                        count++
-                    }
-                 } else if (type === 'patterns') {
-                    const code = row[0]
-                    const start = row[1]
-                    const end = row[2]
-                    if (code && start && end) {
-                        await supabase.from('work_patterns').upsert({ code, start_time: start, end_time: end }, { onConflict: 'code' })
-                        count++
-                    }
-                 }
-             }
+            alert(`${count}件のデータを登録しました！`)
+            fetchMasters()
+            fetchData(selectedMonth)
+
+        } catch (e: any) {
+            console.error(e)
+            alert('読込エラー: ' + e.message)
+        } finally {
+            setUploading(false)
+            e.target.value = ''
         }
-
-        alert(`${count}件のデータを登録しました！`)
-        setUploading(false)
-        e.target.value = ''
-        fetchMasters()
-        fetchData(selectedMonth)
     }
     reader.readAsArrayBuffer(file)
   }
@@ -480,7 +490,7 @@ export default function AdminPage() {
             </div>
             <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
                 <h3 className="font-bold text-slate-700 mb-2">🧑‍🏫 ③ 氏名マスタ登録</h3>
-                <p className="text-xs text-slate-500 mb-2">GoogleコンタクトCSV または (Email,氏名)</p>
+                <p className="text-xs text-slate-500 mb-2">GoogleコンタクトCSV (UTF-8)</p>
                 <input type="file" accept=".csv" onChange={(e) => handleUpload(e, 'users')} disabled={uploading} className="text-xs w-full"/>
             </div>
         </div>
