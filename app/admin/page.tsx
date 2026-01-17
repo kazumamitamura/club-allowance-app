@@ -111,6 +111,28 @@ export default function AdminPage() {
     setPatternDefs(tMap)
   }
 
+  // ★修正: 時間計算の安全性を強化 (NaN防止)
+  const addTime = (curr: number, timeStr: string | null) => {
+    if (!timeStr || !timeStr.includes(':')) return curr
+    const [hStr, mStr] = timeStr.split(':')
+    const h = parseInt(hStr, 10)
+    const m = parseInt(mStr, 10)
+    
+    // 数値でない場合は加算しない
+    if (isNaN(h) || isNaN(m)) return curr
+    
+    return curr + (h * 60) + m
+  }
+
+  // ★修正: 分表示のフォーマット強化
+  const formatMinutes = (minutes: number) => {
+    // NaNや無効な値は空白にする
+    if (!minutes || minutes === 0 || isNaN(minutes)) return ''
+    const h = Math.floor(minutes / 60)
+    const m = minutes % 60
+    return `${h}:${String(m).padStart(2, '0')}`
+  }
+
   const aggregateData = () => {
     const targets = selectedUserId === 'all' ? userList : userList.filter(u => u.id === selectedUserId)
     const result = targets.map(user => {
@@ -154,18 +176,6 @@ export default function AdminPage() {
     fetchData(selectedMonth)
   }
 
-  const addTime = (curr: number, timeStr: string | null) => {
-    if (!timeStr || !timeStr.includes(':')) return curr
-    const [h, m] = timeStr.split(':').map(Number)
-    return curr + (h * 60) + m
-  }
-  const formatMinutes = (mins: number) => {
-    if (mins === 0) return ''
-    const h = Math.floor(mins / 60)
-    const m = mins % 60
-    return `${h}:${String(m).padStart(2, '0')}`
-  }
-
   const downloadAllowanceExcel = () => {
     const wb = XLSX.utils.book_new()
     const y = selectedMonth.getFullYear()
@@ -189,6 +199,8 @@ export default function AdminPage() {
         rows.push({}) 
     })
     const ws = XLSX.utils.json_to_sheet(rows)
+    // 列幅調整
+    ws['!cols'] = [{ wch: 20 }, { wch: 12 }, { wch: 15 }, { wch: 15 }, { wch: 20 }, { wch: 10 }]
     XLSX.utils.book_append_sheet(wb, ws, "手当明細")
     XLSX.writeFile(wb, `特殊勤務手当_${y}年${m}月.xlsx`)
   }
@@ -254,17 +266,21 @@ export default function AdminPage() {
                 "開始時間": times ? times.start.slice(0, 5) : '', "終了時間": times ? times.end.slice(0, 5) : '',
                 "年休": sched?.leave_annual || ''
             }
-            TIME_ITEMS.forEach(t => { const mins = sched ? sched[t.key] : 0; row[t.label] = formatMinutes(mins) })
+            TIME_ITEMS.forEach(t => { 
+                const mins = sched ? sched[t.key] : 0
+                // NaNチェックして安全に変換
+                row[t.label] = formatMinutes(mins) 
+            })
             rows.push(row)
         })
         rows.push({}); rows.push({})
     })
     const ws = XLSX.utils.json_to_sheet(rows, { skipHeader: true })
-    ws['!cols'] = [{ wch: 12 }, { wch: 20 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, ...TIME_ITEMS.map(() => ({ wch: 6 }))]
+    // ★修正: 列幅を少し広げて ###### エラーを防止
+    ws['!cols'] = [{ wch: 12 }, { wch: 20 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, ...TIME_ITEMS.map(() => ({ wch: 10 }))]
     return ws
   }
 
-  // ★修正: 最強のCSVリーダー（Googleコンタクト対応・文字化け回避・スペース除去）
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>, type: 'master' | 'users' | 'patterns') => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -276,59 +292,42 @@ export default function AdminPage() {
     reader.onload = async (evt) => {
         try {
             const data = new Uint8Array(evt.target?.result as ArrayBuffer)
-            // XLSXライブラリで解析（文字コード自動判定）
             const wb = XLSX.read(data, { type: 'array' })
             const sheet = wb.Sheets[wb.SheetNames[0]]
-            // ヘッダー行も含めて2次元配列で取得
             const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][]
             let count = 0
-
-            // 空行を除去
             const cleanRows = rows.filter(row => row.length > 0)
             if (cleanRows.length === 0) throw new Error('データが空です')
 
             if (type === 'users') {
-                 // ヘッダー行を検索（BOM対策で文字列を含んでいるかチェック）
                  const headerRow = cleanRows[0].map(h => String(h).trim())
-                 
-                 // Googleコンタクトのカラムを探す
                  let emailIdx = headerRow.findIndex(h => h.includes('E-mail 1 - Value'))
                  let lastIdx = headerRow.findIndex(h => h.includes('Last Name'))
                  let firstIdx = headerRow.findIndex(h => h.includes('First Name'))
-
-                 // 見つからない場合は通常CSVのカラムを探す (Email, 氏名)
                  if (emailIdx === -1) emailIdx = 0 
                  if (lastIdx === -1) lastIdx = 1
 
                  for (let i = 1; i < cleanRows.length; i++) {
                      const row = cleanRows[i]
                      const email = row[emailIdx]
-                     
-                     // 名前結合ロジック（全角スペース除去）
                      let fullName = ''
                      if (lastIdx !== -1 && firstIdx !== -1) {
-                         // Google形式 (姓 + 名)
                          const ln = String(row[lastIdx] || '').replace(/[ 　]+/g, '')
                          const fn = String(row[firstIdx] || '').replace(/[ 　]+/g, '')
                          fullName = `${ln} ${fn}`.trim()
                      } else {
-                         // 通常形式 (氏名)
-                         fullName = String(row[lastIdx] || '').replace(/[ 　]+/g, '') // 名字カラムを氏名として使う
+                         fullName = String(row[lastIdx] || '').replace(/[ 　]+/g, '') 
                      }
-                     
                      if (email && String(email).includes('@') && fullName) {
                          await supabase.from('user_profiles').upsert({ email: String(email).trim(), full_name: fullName })
                          count++
                      }
                  }
-
             } else {
-                 // master, patterns
                  for (const row of cleanRows) {
                      if (type === 'master') {
                         let dateStr = String(row[0]).replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/\//g, '-')
                         const code = row[1]
-                        // シリアル値対応
                         if (!isNaN(Number(row[0])) && Number(row[0]) > 40000) {
                             const d = new Date((Number(row[0]) - 25569) * 86400 * 1000)
                             dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
@@ -350,11 +349,9 @@ export default function AdminPage() {
                      }
                  }
             }
-
             alert(`${count}件のデータを登録しました！`)
             fetchMasters()
             fetchData(selectedMonth)
-
         } catch (e: any) {
             console.error(e)
             alert('読込エラー: ' + e.message)
@@ -490,7 +487,7 @@ export default function AdminPage() {
             </div>
             <div className="bg-white p-4 rounded-lg shadow-sm border border-slate-200">
                 <h3 className="font-bold text-slate-700 mb-2">🧑‍🏫 ③ 氏名マスタ登録</h3>
-                <p className="text-xs text-slate-500 mb-2">GoogleコンタクトCSV (UTF-8)</p>
+                <p className="text-xs text-slate-500 mb-2">GoogleコンタクトCSV または (Email,氏名)</p>
                 <input type="file" accept=".csv" onChange={(e) => handleUpload(e, 'users')} disabled={uploading} className="text-xs w-full"/>
             </div>
         </div>
