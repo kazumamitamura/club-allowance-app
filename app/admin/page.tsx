@@ -111,22 +111,17 @@ export default function AdminPage() {
     setPatternDefs(tMap)
   }
 
-  // ★修正: 時間計算の安全性を強化 (NaN防止)
+  // 集計用計算（こちらは合計を出すので計算が必要）
   const addTime = (curr: number, timeStr: string | null) => {
     if (!timeStr || !timeStr.includes(':')) return curr
     const [hStr, mStr] = timeStr.split(':')
     const h = parseInt(hStr, 10)
     const m = parseInt(mStr, 10)
-    
-    // 数値でない場合は加算しない
     if (isNaN(h) || isNaN(m)) return curr
-    
     return curr + (h * 60) + m
   }
 
-  // ★修正: 分表示のフォーマット強化
   const formatMinutes = (minutes: number) => {
-    // NaNや無効な値は空白にする
     if (!minutes || minutes === 0 || isNaN(minutes)) return ''
     const h = Math.floor(minutes / 60)
     const m = minutes % 60
@@ -161,6 +156,7 @@ export default function AdminPage() {
             if (s.leave_annual === '1日') row.annual_leave_used += 1.0
             if (s.leave_annual === '半日') row.annual_leave_used += 0.5
             TIME_ITEMS.forEach(t => {
+                // 合計計算用には数値変換を使用
                 if (s[t.key]) row.time_totals[t.key] = addTime(row.time_totals[t.key], s[t.key])
             })
         })
@@ -176,6 +172,7 @@ export default function AdminPage() {
     fetchData(selectedMonth)
   }
 
+  // ① 手当帳票
   const downloadAllowanceExcel = () => {
     const wb = XLSX.utils.book_new()
     const y = selectedMonth.getFullYear()
@@ -199,12 +196,12 @@ export default function AdminPage() {
         rows.push({}) 
     })
     const ws = XLSX.utils.json_to_sheet(rows)
-    // 列幅調整
     ws['!cols'] = [{ wch: 20 }, { wch: 12 }, { wch: 15 }, { wch: 15 }, { wch: 20 }, { wch: 10 }]
     XLSX.utils.book_append_sheet(wb, ws, "手当明細")
     XLSX.writeFile(wb, `特殊勤務手当_${y}年${m}月.xlsx`)
   }
 
+  // ② 月間 勤務表
   const downloadMonthlyScheduleExcel = () => {
     const wb = XLSX.utils.book_new()
     const y = selectedMonth.getFullYear()
@@ -214,6 +211,7 @@ export default function AdminPage() {
     XLSX.writeFile(wb, `勤務実績表_${y}年${m}月.xlsx`)
   }
 
+  // ③ 年間 勤務表
   const downloadAnnualScheduleExcel = async () => {
     if (!confirm('現在表示中の「年度（4月〜翌3月）」の全データを取得して出力します。\nよろしいですか？')) return
     setDownloading(true)
@@ -244,6 +242,7 @@ export default function AdminPage() {
     } catch (e) { alert('出力エラー'); console.error(e) } finally { setDownloading(false) }
   }
 
+  // --- ★修正: 勤務表シート作成 (生データをそのまま出力) ---
   const createScheduleSheet = (year: number, month: number, sourceData: any[]) => {
     const lastDay = new Date(year, month, 0).getDate()
     const allDates: string[] = []
@@ -266,21 +265,21 @@ export default function AdminPage() {
                 "開始時間": times ? times.start.slice(0, 5) : '', "終了時間": times ? times.end.slice(0, 5) : '',
                 "年休": sched?.leave_annual || ''
             }
+            // ★ここを修正: 数値変換せず、登録された文字をそのまま出力する
             TIME_ITEMS.forEach(t => { 
-                const mins = sched ? sched[t.key] : 0
-                // NaNチェックして安全に変換
-                row[t.label] = formatMinutes(mins) 
+                const rawValue = sched ? sched[t.key] : ''
+                row[t.label] = rawValue // そのまま代入
             })
             rows.push(row)
         })
         rows.push({}); rows.push({})
     })
     const ws = XLSX.utils.json_to_sheet(rows, { skipHeader: true })
-    // ★修正: 列幅を少し広げて ###### エラーを防止
     ws['!cols'] = [{ wch: 12 }, { wch: 20 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, ...TIME_ITEMS.map(() => ({ wch: 10 }))]
     return ws
   }
 
+  // CSVアップロード
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>, type: 'master' | 'users' | 'patterns') => {
     const file = e.target.files?.[0]
     if (!file) return
