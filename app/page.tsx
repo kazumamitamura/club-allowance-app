@@ -48,7 +48,6 @@ export default function Home() {
   const [masterSchedules, setMasterSchedules] = useState<MasterSchedule[]>([]) 
   const [workPatterns, setWorkPatterns] = useState<WorkPattern[]>([])
   
-  // ★変更: 2つのステータス管理
   const [allowanceStatus, setAllowanceStatus] = useState<'draft' | 'submitted' | 'approved'>('draft')
   const [scheduleStatus, setScheduleStatus] = useState<'draft' | 'submitted' | 'approved'>('draft')
   
@@ -67,24 +66,27 @@ export default function Home() {
   const [isAccommodation, setIsAccommodation] = useState(false)
   const [calculatedAmount, setCalculatedAmount] = useState(0)
 
-  // ロック判定：どちらか一方でも申請済みなら編集ロック（安全運用）
-  const isLocked = (targetDate: Date) => {
-    if (isAdmin) return false 
+  // ★修正: ロック判定を分離（月次締めチェックは共通、申請状態は個別）
+  const getLockStatus = (targetDate: Date) => {
+    if (isAdmin) return { schedule: false, allowance: false }
     
+    // 1. 共通の月次締め切りチェック
     const now = new Date()
     const deadline = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 6, 0, 0, 0)
-    if (now >= deadline) return true
+    const isPastDeadline = now >= deadline
 
+    // 2. 申請状態チェック
     const currentViewMonth = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, '0')}`
     const targetMonth = `${targetDate.getFullYear()}-${String(targetDate.getMonth() + 1).padStart(2, '0')}`
-    
-    // 表示中の月が、手当または勤務表どちらかでも申請済みならロック
-    if (currentViewMonth === targetMonth) {
-        if (allowanceStatus !== 'draft' || scheduleStatus !== 'draft') return true
-    }
+    const isTargetMonth = currentViewMonth === targetMonth
 
-    return false
+    return {
+        schedule: isPastDeadline || (isTargetMonth && scheduleStatus !== 'draft'),
+        allowance: isPastDeadline || (isTargetMonth && allowanceStatus !== 'draft')
+    }
   }
+
+  const { schedule: isSchedLocked, allowance: isAllowLocked } = getLockStatus(selectedDate)
 
   useEffect(() => {
     const init = async () => {
@@ -119,14 +121,11 @@ export default function Home() {
     const { data } = await supabase.from('master_schedules').select('*'); setMasterSchedules(data || [])
   }
 
-  // ★変更: 2種類のステータスを取得
   const fetchApplicationStatus = async (uid: string, date: Date) => {
     const ym = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
     const { data } = await supabase.from('monthly_applications').select('application_type, status').eq('user_id', uid).eq('year_month', ym)
-    
     const allow = data?.find(d => d.application_type === 'allowance')
     const sched = data?.find(d => d.application_type === 'schedule')
-    
     setAllowanceStatus(allow?.status || 'draft')
     setScheduleStatus(sched?.status || 'draft')
   }
@@ -174,34 +173,56 @@ export default function Home() {
     setDetails((prev: any) => { const next = { ...prev }; if (value === '') delete next[key]; else next[key] = value; return next })
   }
 
+  // ★修正: 保存処理のスマート化
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (isLocked(selectedDate)) { alert('申請済み、または締め日を過ぎているため編集できません'); return }
+    
+    // 両方ロックなら何もしない
+    if (isSchedLocked && isAllowLocked) {
+        alert('勤務表・手当ともに申請済みのため、編集できません。')
+        return
+    }
 
     const dateStr = formatDate(selectedDate)
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
 
-    const scheduleData: any = { 
-        user_id: user.id, user_email: user.email, date: dateStr, 
-        work_pattern_code: selectedPattern, leave_annual: details['leave_annual'] || null 
-    };
-    LEAVE_ITEMS_TIME.forEach(item => { scheduleData[item.key] = details[item.key] || null })
-
-    const { error: sErr } = await supabase.from('daily_schedules').upsert(scheduleData, { onConflict: 'user_id, date' })
-    if (sErr) { alert('エラー: ' + sErr.message); return }
-
-    if (activityId) {
-      await supabase.from('allowances').delete().eq('user_id', user.id).eq('date', dateStr)
-      await supabase.from('allowances').insert({ user_id: user.id, user_email: user.email, date: dateStr, activity_type: ACTIVITY_TYPES.find(a => a.id === activityId)?.label || activityId, destination_type: DESTINATIONS.find(d => d.id === destinationId)?.label, destination_detail: destinationDetail, is_driving: isDriving, is_accommodation: isAccommodation, amount: calculatedAmount })
-    } else {
-      await supabase.from('allowances').delete().eq('user_id', user.id).eq('date', dateStr)
+    // --- 1. 勤務表の保存 (ロックされていなければ) ---
+    if (!isSchedLocked) {
+        const scheduleData: any = { 
+            user_id: user.id, user_email: user.email, date: dateStr, 
+            work_pattern_code: selectedPattern, leave_annual: details['leave_annual'] || null 
+        };
+        LEAVE_ITEMS_TIME.forEach(item => { scheduleData[item.key] = details[item.key] || null })
+        const { error: sErr } = await supabase.from('daily_schedules').upsert(scheduleData, { onConflict: 'user_id, date' })
+        if (sErr) { alert('勤務表保存エラー: ' + sErr.message); return }
     }
-    fetchData(user.id); setIsRegistered(true); setOpenCategory(null); alert('保存しました')
+
+    // --- 2. 手当の保存 (ロックされていなければ) ---
+    if (!isAllowLocked) {
+        if (activityId) {
+            await supabase.from('allowances').delete().eq('user_id', user.id).eq('date', dateStr)
+            await supabase.from('allowances').insert({ user_id: user.id, user_email: user.email, date: dateStr, activity_type: ACTIVITY_TYPES.find(a => a.id === activityId)?.label || activityId, destination_type: DESTINATIONS.find(d => d.id === destinationId)?.label, destination_detail: destinationDetail, is_driving: isDriving, is_accommodation: isAccommodation, amount: calculatedAmount })
+        } else {
+            await supabase.from('allowances').delete().eq('user_id', user.id).eq('date', dateStr)
+        }
+    }
+
+    fetchData(user.id); setIsRegistered(true); setOpenCategory(null)
+    
+    // メッセージの出し分け
+    if (isSchedLocked) alert('手当のみ保存しました (勤務表は申請済)')
+    else if (isAllowLocked) alert('勤務表のみ保存しました (手当は申請済)')
+    else alert('保存しました')
   }
 
+  // ★修正: 一括登録は「勤務表」のみに関係するので、勤務表ロックのみチェック
   const handleBulkRegister = async () => {
-    if (isLocked(new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1))) { alert('ロックされているため操作できません'); return }
+    if (getLockStatus(new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1)).schedule) { 
+        alert('勤務表が申請済みのため、一括登録はできません。')
+        return 
+    }
+    
     if (!confirm(`${selectedDate.getMonth()+1}月の未入力日を、すべて「デフォルト勤務」として一括登録しますか？`)) return
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
@@ -217,25 +238,21 @@ export default function Home() {
     if (error) alert('エラー: ' + error.message); else { alert('完了しました！'); fetchData(user.id); router.refresh() }
   }
 
+  // 削除ボタン (手当のみ削除)
   const handleDelete = async (id: number, dateStr: string) => { 
-    if (isLocked(new Date(dateStr))) { alert('ロックされているため削除できません'); return }
+    if (getLockStatus(new Date(dateStr)).allowance) { alert('手当が申請済みのため削除できません'); return }
     if (!window.confirm('削除しますか？')) return; 
     const { error } = await supabase.from('allowances').delete().eq('id', id)
     if (!error) fetchData(userId)
   }
   
-  // ★追加: 申請処理 (type別)
   const handleSubmit = async (type: 'allowance' | 'schedule') => {
     const label = type === 'allowance' ? '手当' : '勤務表'
-    if (!confirm(`${selectedDate.getMonth()+1}月分の【${label}】を確定して申請しますか？\n※申請すると、承認されるまで修正できなくなります。`)) return
+    if (!confirm(`${selectedDate.getMonth()+1}月分の【${label}】を確定して申請しますか？\n※申請すると、承認されるまで${label}項目の修正ができなくなります。`)) return
     
     const ym = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, '0')}`
     const { error } = await supabase.from('monthly_applications').upsert({
-        user_id: userId,
-        year_month: ym,
-        application_type: type,
-        status: 'submitted',
-        submitted_at: new Date().toISOString()
+        user_id: userId, year_month: ym, application_type: type, status: 'submitted', submitted_at: new Date().toISOString()
     })
 
     if (error) alert('申請エラー: ' + error.message)
@@ -268,8 +285,6 @@ export default function Home() {
   const currentPatternDetail = workPatterns.find(p => p.code === selectedPattern)
   const hasLeave = details['leave_annual'] || LEAVE_ITEMS_TIME.some(i => details[i.key])
   
-  const isCurrentLocked = isLocked(selectedDate)
-
   return (
     <div className="min-h-screen bg-slate-50 pb-20">
        {isAdmin && <div className="bg-slate-800 text-white text-center py-3 text-sm font-bold shadow-md"><a href="/admin" className="underline hover:text-blue-300 transition">事務担当者ページへ</a></div>}
@@ -284,17 +299,14 @@ export default function Home() {
           </div>
           <h1 className="text-4xl font-extrabold text-slate-800">¥{calculateMonthTotal().toLocaleString()}</h1>
           
-          {/* ★修正: 2つの申請ボタンとステータス */}
           <div className="mt-3 flex flex-col gap-2 items-center w-full">
               {/* 手当ステータス */}
               <div className="flex items-center gap-2">
                   <span className="text-xs font-bold text-slate-500 w-12 text-right">手当:</span>
                   {allowanceStatus === 'approved' && <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-bold">🈴 承認済</span>}
                   {allowanceStatus === 'submitted' && <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded text-xs font-bold">⏳ 申請中</span>}
-                  {allowanceStatus === 'draft' && !isCurrentLocked && (
-                      <button onClick={() => handleSubmit('allowance')} className="text-xs font-bold text-white bg-blue-600 px-3 py-1 rounded-full hover:bg-blue-700 shadow-sm">💰 申請</button>
-                  )}
-                  {allowanceStatus === 'draft' && isCurrentLocked && <span className="text-xs text-slate-400">未申請(ロック)</span>}
+                  {allowanceStatus === 'draft' && !isAllowLocked && <button onClick={() => handleSubmit('allowance')} className="text-xs font-bold text-white bg-blue-600 px-3 py-1 rounded-full hover:bg-blue-700 shadow-sm">💰 申請</button>}
+                  {allowanceStatus === 'draft' && isAllowLocked && <span className="text-xs text-slate-400">締切済(ロック)</span>}
               </div>
 
               {/* 勤務表ステータス */}
@@ -302,13 +314,11 @@ export default function Home() {
                   <span className="text-xs font-bold text-slate-500 w-12 text-right">勤務表:</span>
                   {scheduleStatus === 'approved' && <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-bold">🈴 承認済</span>}
                   {scheduleStatus === 'submitted' && <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded text-xs font-bold">⏳ 申請中</span>}
-                  {scheduleStatus === 'draft' && !isCurrentLocked && (
-                      <button onClick={() => handleSubmit('schedule')} className="text-xs font-bold text-white bg-green-600 px-3 py-1 rounded-full hover:bg-green-700 shadow-sm">⏰ 申請</button>
-                  )}
-                  {scheduleStatus === 'draft' && isCurrentLocked && <span className="text-xs text-slate-400">未申請(ロック)</span>}
+                  {scheduleStatus === 'draft' && !isSchedLocked && <button onClick={() => handleSubmit('schedule')} className="text-xs font-bold text-white bg-green-600 px-3 py-1 rounded-full hover:bg-green-700 shadow-sm">⏰ 申請</button>}
+                  {scheduleStatus === 'draft' && isSchedLocked && <span className="text-xs text-slate-400">締切済(ロック)</span>}
               </div>
               
-              {!isCurrentLocked && <button onClick={handleBulkRegister} className="mt-1 text-xs text-slate-400 underline">一括登録はこちら</button>}
+              {!isSchedLocked && <button onClick={handleBulkRegister} className="mt-1 text-xs text-slate-400 underline">一括登録はこちら</button>}
           </div>
         </div>
       </div>
@@ -318,21 +328,23 @@ export default function Home() {
           <Calendar onChange={(val) => setSelectedDate(val as Date)} value={selectedDate} activeStartDate={selectedDate} onActiveStartDateChange={({ activeStartDate }) => activeStartDate && setSelectedDate(activeStartDate)} locale="ja-JP" tileContent={getTileContent} className="w-full border-none" />
         </div>
 
-        <div className={`p-6 rounded-3xl shadow-sm border ${isCurrentLocked ? 'bg-slate-100 border-slate-300' : isRegistered ? 'bg-green-50 border-green-200' : 'bg-white border-slate-200'}`}>
+        <div className={`p-6 rounded-3xl shadow-sm border ${isSchedLocked && isAllowLocked ? 'bg-slate-100 border-slate-300' : isRegistered ? 'bg-green-50 border-green-200' : 'bg-white border-slate-200'}`}>
           <div className="flex justify-between items-center mb-4 border-b pb-2">
             <h2 className="font-bold text-slate-700 text-sm">{selectedDate.getMonth() + 1}/{selectedDate.getDate()} の勤務・手当</h2>
             <div className="flex gap-2">
-                {isCurrentLocked && <span className="text-xs px-2 py-1 rounded font-bold bg-red-100 text-red-600">🔒 ロック中</span>}
+                {isSchedLocked && <span className="text-xs px-2 py-1 rounded font-bold bg-gray-100 text-gray-500">⏰ ロック</span>}
+                {isAllowLocked && <span className="text-xs px-2 py-1 rounded font-bold bg-gray-100 text-gray-500">💰 ロック</span>}
                 <span className={`text-xs px-2 py-1 rounded font-bold ${isRegistered ? 'bg-green-200 text-green-800' : 'bg-slate-200 text-slate-500'}`}>{isRegistered ? '登録済' : '未登録'}</span>
             </div>
           </div>
 
-          <form onSubmit={handleSave} className={`flex flex-col gap-4 ${isCurrentLocked ? 'opacity-60 pointer-events-none' : ''}`}>
+          <form onSubmit={handleSave} className={`flex flex-col gap-4 ${isSchedLocked && isAllowLocked ? 'opacity-60 pointer-events-none' : ''}`}>
             
-            <div className="bg-white p-3 rounded-xl border border-slate-200">
-              <label className="block text-xs font-bold text-black mb-1">勤務パターン</label>
+            {/* 1. 勤務表エリア (isSchedLockedで制御) */}
+            <div className={`bg-white p-3 rounded-xl border ${isSchedLocked ? 'border-gray-200 opacity-60 pointer-events-none bg-gray-50' : 'border-slate-200'}`}>
+              <label className="block text-xs font-bold text-black mb-1">勤務パターン {isSchedLocked && '(編集不可)'}</label>
               <div className="flex items-center gap-2">
-                <select value={selectedPattern} onChange={(e) => setSelectedPattern(e.target.value)} className="flex-1 bg-white p-2 rounded border border-slate-300 font-bold text-black">
+                <select disabled={isSchedLocked} value={selectedPattern} onChange={(e) => setSelectedPattern(e.target.value)} className="flex-1 bg-white p-2 rounded border border-slate-300 font-bold text-black">
                   <option value="">(未設定)</option>
                   {workPatterns.map(p => <option key={p.id} value={p.code}>{p.code} ({p.start_time.slice(0,5)}-{p.end_time.slice(0,5)})</option>)}
                 </select>
@@ -340,9 +352,9 @@ export default function Home() {
               </div>
             </div>
 
-            <div className={`bg-white rounded-xl border transition-all ${openCategory === 'leave' ? 'border-green-400 ring-2 ring-green-100' : hasLeave ? 'border-green-300' : 'border-slate-200'}`}>
-              <button type="button" onClick={() => setOpenCategory(openCategory === 'leave' ? null : 'leave')} className="w-full flex justify-between items-center p-3 text-left">
-                 <div className="flex items-center gap-2"><span className="text-lg">🌴</span><span className={`text-xs font-bold ${hasLeave ? 'text-green-600' : 'text-black'}`}>休暇・欠勤</span></div>
+            <div className={`bg-white rounded-xl border transition-all ${isSchedLocked ? 'border-gray-200 opacity-60 pointer-events-none bg-gray-50' : openCategory === 'leave' ? 'border-green-400 ring-2 ring-green-100' : hasLeave ? 'border-green-300' : 'border-slate-200'}`}>
+              <button disabled={isSchedLocked} type="button" onClick={() => setOpenCategory(openCategory === 'leave' ? null : 'leave')} className="w-full flex justify-between items-center p-3 text-left">
+                 <div className="flex items-center gap-2"><span className="text-lg">🌴</span><span className={`text-xs font-bold ${hasLeave ? 'text-green-600' : 'text-black'}`}>休暇・欠勤 {isSchedLocked && '(編集不可)'}</span></div>
                 <span className="text-slate-400 text-xs">{openCategory === 'leave' ? '▲ 閉じる' : hasLeave ? '詳細あり ▼' : '追加する +'}</span>
               </button>
               {(openCategory === 'leave' || hasLeave) && (
@@ -355,27 +367,36 @@ export default function Home() {
             </div>
 
             <hr className="border-slate-100" />
-            <div>
-              <label className="block text-xs font-bold text-black mb-1">部活動 業務内容</label>
-              <select value={activityId} onChange={(e) => setActivityId(e.target.value)} className="w-full bg-slate-50 p-3 rounded-lg border border-slate-200 font-bold text-black text-sm">
-                <option value="">なし (部活なし)</option>
-                {ACTIVITY_TYPES.map(type => <option key={type.id} value={type.id}>{type.label}</option>)}
-              </select>
+            
+            {/* 2. 手当エリア (isAllowLockedで制御) */}
+            <div className={`${isAllowLocked ? 'opacity-60 pointer-events-none grayscale' : ''}`}>
+                <div>
+                <label className="block text-xs font-bold text-black mb-1">部活動 業務内容 {isAllowLocked && '(編集不可)'}</label>
+                <select disabled={isAllowLocked} value={activityId} onChange={(e) => setActivityId(e.target.value)} className="w-full bg-slate-50 p-3 rounded-lg border border-slate-200 font-bold text-black text-sm">
+                    <option value="">なし (部活なし)</option>
+                    {ACTIVITY_TYPES.map(type => <option key={type.id} value={type.id}>{type.label}</option>)}
+                </select>
+                </div>
+                {activityId && (
+                <>
+                    <div className="grid grid-cols-2 gap-2 mt-2">
+                    <div><label className="block text-xs font-bold text-black mb-1">区分</label><select disabled={isAllowLocked} value={destinationId} onChange={(e) => setDestinationId(e.target.value)} className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-black font-bold">{DESTINATIONS.map(d => <option key={d.id} value={d.id}>{d.label}</option>)}</select></div>
+                    <div><label className="block text-xs font-bold text-black mb-1">詳細</label><input disabled={isAllowLocked} type="text" placeholder="例: 県体育館" value={destinationDetail} onChange={(e) => setDestinationDetail(e.target.value)} className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-black font-bold" /></div>
+                    </div>
+                    <div className="flex gap-3 mt-2">
+                    <label className={`flex-1 p-3 rounded-lg cursor-pointer border text-center text-xs font-bold ${isDriving ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-400'}`}><input disabled={isAllowLocked} type="checkbox" checked={isDriving} onChange={e => setIsDriving(e.target.checked)} className="hidden" />🚗 運転あり</label>
+                    <label className={`flex-1 p-3 rounded-lg cursor-pointer border text-center text-xs font-bold ${isAccommodation ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-400'}`}><input disabled={isAllowLocked} type="checkbox" checked={isAccommodation} onChange={e => setIsAccommodation(e.target.checked)} className="hidden" />🏨 宿泊あり</label>
+                    </div>
+                    <div className="bg-slate-800 text-white p-4 rounded-xl flex justify-between items-center mt-2"><span className="text-xs font-medium">支給予定額</span><span className="text-xl font-bold">¥{calculatedAmount.toLocaleString()}</span></div>
+                </>
+                )}
             </div>
-            {activityId && (
-            <>
-                <div className="grid grid-cols-2 gap-2">
-                <div><label className="block text-xs font-bold text-black mb-1">区分</label><select value={destinationId} onChange={(e) => setDestinationId(e.target.value)} className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-black font-bold">{DESTINATIONS.map(d => <option key={d.id} value={d.id}>{d.label}</option>)}</select></div>
-                <div><label className="block text-xs font-bold text-black mb-1">詳細 (会場名等)</label><input type="text" placeholder="例: 県体育館" value={destinationDetail} onChange={(e) => setDestinationDetail(e.target.value)} className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-black font-bold" /></div>
-                </div>
-                <div className="flex gap-3">
-                <label className={`flex-1 p-3 rounded-lg cursor-pointer border text-center text-xs font-bold ${isDriving ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-400'}`}><input type="checkbox" checked={isDriving} onChange={e => setIsDriving(e.target.checked)} className="hidden" />🚗 運転あり</label>
-                <label className={`flex-1 p-3 rounded-lg cursor-pointer border text-center text-xs font-bold ${isAccommodation ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-400'}`}><input type="checkbox" checked={isAccommodation} onChange={e => setIsAccommodation(e.target.checked)} className="hidden" />🏨 宿泊あり</label>
-                </div>
-                <div className="bg-slate-800 text-white p-4 rounded-xl flex justify-between items-center"><span className="text-xs font-medium">支給予定額</span><span className="text-xl font-bold">¥{calculatedAmount.toLocaleString()}</span></div>
-            </>
+
+            {(!isSchedLocked || !isAllowLocked) && (
+                <button type="submit" className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 shadow-md">
+                    この内容で保存する
+                </button>
             )}
-            <button type="submit" className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 shadow-md">この内容で保存する</button>
           </form>
         </div>
 
@@ -385,7 +406,7 @@ export default function Home() {
             <div key={item.id} className="bg-white p-3 rounded-xl shadow-sm flex justify-between items-center border border-slate-100">
                 <div className="flex items-center gap-3"><span className="font-bold text-slate-700 text-sm">{item.date.split('-')[2]}日</span><span className="text-xs text-slate-500">{item.activity_type}</span></div>
                 <div className="flex items-center gap-2"><span className="font-bold text-slate-700 text-sm">¥{item.amount.toLocaleString()}</span>
-                    {!isCurrentLocked && <button onClick={() => handleDelete(item.id, item.date)} className="text-slate-300 hover:text-red-500">🗑</button>}
+                    {!isAllowLocked && <button onClick={() => handleDelete(item.id, item.date)} className="text-slate-300 hover:text-red-500">🗑</button>}
                 </div>
             </div>
             ))}
