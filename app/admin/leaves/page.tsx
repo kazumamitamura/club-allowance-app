@@ -3,17 +3,13 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/utils/supabase/client'
 import { useRouter } from 'next/navigation'
-
-const ADMIN_EMAILS = [
-  'mitamuraka@haguroko.ed.jp',
-  'tomonoem@haguroko.ed.jp'
-].map(email => email.toLowerCase())
+import { checkAccess, canManageLeaves } from '@/utils/adminRoles'
 
 export default function AdminLeavesPage() {
   const router = useRouter()
   const supabase = createClient()
   
-  const [isAdmin, setIsAdmin] = useState(false)
+  const [isAuthorized, setIsAuthorized] = useState(false)
   const [loading, setLoading] = useState(true)
   const [leaves, setLeaves] = useState<any[]>([])
   const [userProfiles, setUserProfiles] = useState<Record<string, string>>({})
@@ -22,17 +18,25 @@ export default function AdminLeavesPage() {
   const [filter, setFilter] = useState<'pending' | 'approved' | 'rejected'>('pending')
 
   useEffect(() => {
-    const checkAdmin = async () => {
+    const checkAuth = async () => {
       const { data: { user } } = await supabase.auth.getUser()
-      if (!user || !ADMIN_EMAILS.includes(user.email?.toLowerCase() || '')) {
-        alert('管理者権限がありません')
-        router.push('/')
+      if (!user) {
+        alert('ログインが必要です')
+        router.push('/login')
         return
       }
-      setIsAdmin(true)
+
+      const hasAccess = checkAccess(user.email || '', canManageLeaves)
+      if (!hasAccess) {
+        alert('休暇管理の権限がありません')
+        router.push('/admin')
+        return
+      }
+
+      setIsAuthorized(true)
       fetchData()
     }
-    checkAdmin()
+    checkAuth()
   }, [filter]) // フィルタ変更時に再取得
 
   const fetchData = async () => {
@@ -67,17 +71,17 @@ export default function AdminLeavesPage() {
     else fetchData()
   }
 
-  if (!isAdmin) return <div className="p-10 text-center">確認中...</div>
+  if (!isAuthorized) return <div className="p-10 text-center">確認中...</div>
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       {/* ヘッダー */}
       <div className="bg-orange-600 text-white p-4 shadow-md sticky top-0 z-20 flex justify-between items-center">
         <h1 className="font-bold text-lg flex items-center gap-2">
-            <span className="text-2xl">📄</span> 休暇届 管理センター
+            <span className="text-2xl">📄</span> 休暇届管理
         </h1>
         <button onClick={() => router.push('/admin')} className="text-xs bg-orange-700 px-4 py-2 rounded hover:bg-orange-800 font-bold border border-orange-500">
-            ← 手当・勤務管理へ戻る
+            ← ダッシュボードへ
         </button>
       </div>
 

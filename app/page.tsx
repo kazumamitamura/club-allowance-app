@@ -30,7 +30,7 @@ type WorkPattern = { id: number, code: string, start_time: string, end_time: str
 type DailySchedule = { id: number, user_id: string, date: string, work_pattern_code: string | null, [key: string]: any }
 type SchoolCalendar = { date: string, day_type: string }
 type MasterSchedule = { date: string, work_pattern_code: string }
-type LeaveApplication = { id: number, user_id: string, date: string, leave_type: string, duration: string, reason: string, status: string }
+type LeaveApplication = { id: number, user_id: string, date: string, leave_type: string, duration?: string, duration_type?: string, reason: string, status: string }
 
 const formatDate = (date: Date) => {
   const y = date.getFullYear()
@@ -231,7 +231,7 @@ export default function Home() {
       setCurrentLeaveApp(leaveApp || null)
       if (leaveApp) {
           setLeaveType(leaveApp.leave_type)
-          setLeaveDuration(leaveApp.duration)
+          setLeaveDuration(leaveApp.duration_type || leaveApp.duration || '1日') // ★修正: duration_type優先
           setLeaveReason(leaveApp.reason || '')
       } else {
           setLeaveType('年次有給休暇')
@@ -282,7 +282,7 @@ export default function Home() {
           user_id: userId,
           date: dateStr,
           leave_type: leaveType,
-          duration: leaveDuration,
+          duration_type: leaveDuration, // ★修正: duration → duration_type
           hours_used: hoursUsed,
           reason: leaveReason,
           status: 'pending'
@@ -543,15 +543,15 @@ export default function Home() {
                        <div className="space-y-2">
                            <div>
                                <label className="block text-xs font-bold text-slate-500 mb-1">種類</label>
-                               <select value={leaveType} onChange={(e) => setLeaveType(e.target.value)} className="w-full p-2 text-sm border rounded bg-white font-bold">{LEAVE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}</select>
+                               <select value={leaveType} onChange={(e) => setLeaveType(e.target.value)} className="w-full p-2 text-sm border rounded bg-white font-bold text-black">{LEAVE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}</select>
                            </div>
                            <div>
                                <label className="block text-xs font-bold text-slate-500 mb-1">期間</label>
-                               <select value={leaveDuration} onChange={(e) => setLeaveDuration(e.target.value)} className="w-full p-2 text-sm border rounded bg-white font-bold">{LEAVE_DURATIONS.map(d => <option key={d} value={d}>{d}</option>)}</select>
+                               <select value={leaveDuration} onChange={(e) => setLeaveDuration(e.target.value)} className="w-full p-2 text-sm border rounded bg-white font-bold text-black">{LEAVE_DURATIONS.map(d => <option key={d} value={d}>{d}</option>)}</select>
                            </div>
                            <div>
                                <label className="block text-xs font-bold text-slate-500 mb-1">事由</label>
-                               <input type="text" value={leaveReason} onChange={(e) => setLeaveReason(e.target.value)} placeholder="例: 私用のため" className="w-full p-2 text-sm border rounded bg-white" />
+                               <input type="text" value={leaveReason} onChange={(e) => setLeaveReason(e.target.value)} placeholder="例: 私用のため" className="w-full p-2 text-sm border rounded bg-white text-black" />
                            </div>
                            <div className="flex gap-2 pt-2">
                                <button type="button" onClick={handleLeaveApply} className="flex-1 bg-orange-500 text-white font-bold py-2 rounded shadow text-xs">

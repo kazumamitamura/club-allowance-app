@@ -3,15 +3,15 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/utils/supabase/client'
 import { useRouter } from 'next/navigation'
-
-const ADMIN_EMAILS = ['mitamuraka@haguroko.ed.jp', 'tomonoem@haguroko.ed.jp'].map(e => e.toLowerCase())
+import { isAdmin as checkIsAdmin, getUserRoles } from '@/utils/adminRoles'
 
 export default function AdminDashboard() {
   const router = useRouter()
   const supabase = createClient()
   
-  const [isAdmin, setIsAdmin] = useState(false)
+  const [isAuthorized, setIsAuthorized] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [userRoles, setUserRoles] = useState<string[]>([])
   const [stats, setStats] = useState({
     pendingAllowances: 0,
     pendingSchedules: 0,
@@ -19,17 +19,25 @@ export default function AdminDashboard() {
   })
 
   useEffect(() => {
-    const checkAdmin = async () => {
+    const checkAuth = async () => {
       const { data: { user } } = await supabase.auth.getUser()
-      if (!user || !ADMIN_EMAILS.includes(user.email?.toLowerCase() || '')) {
+      if (!user) {
+        alert('ログインが必要です')
+        router.push('/login')
+        return
+      }
+
+      if (!checkIsAdmin(user.email || '')) {
         alert('管理者権限がありません')
         router.push('/')
         return
       }
-      setIsAdmin(true)
+
+      setIsAuthorized(true)
+      setUserRoles(getUserRoles(user.email || ''))
       fetchStats()
     }
-    checkAdmin()
+    checkAuth()
   }, [])
 
   const fetchStats = async () => {
@@ -67,7 +75,7 @@ export default function AdminDashboard() {
     router.push('/login')
   }
 
-  if (!isAdmin) return <div className="p-10 text-center">確認中...</div>
+  if (!isAuthorized) return <div className="p-10 text-center">確認中...</div>
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
@@ -77,6 +85,15 @@ export default function AdminDashboard() {
           <div>
             <h1 className="text-3xl font-bold mb-1">管理者ダッシュボード</h1>
             <p className="text-slate-300 text-sm">学校法人 勤務・手当・休暇管理システム</p>
+            {userRoles.length > 0 && (
+              <div className="mt-2 flex gap-2">
+                {userRoles.map(role => (
+                  <span key={role} className="bg-slate-700 text-slate-200 px-2 py-1 rounded text-xs font-bold">
+                    {role}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
           <div className="flex gap-3">
             <button onClick={() => router.push('/')} className="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg font-bold text-sm transition">
@@ -109,136 +126,103 @@ export default function AdminDashboard() {
           </div>
         </div>
 
-        {/* メニューカード */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-          {/* 手当承認 */}
+        {/* メインメニューカード（3分割） */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-8">
+          {/* 手当管理 */}
           <button 
             onClick={() => router.push('/admin/allowances')}
-            className="bg-white p-8 rounded-2xl shadow-md hover:shadow-xl transition-all text-left group border-2 border-transparent hover:border-blue-500"
+            className="bg-gradient-to-br from-blue-500 to-blue-600 p-10 rounded-3xl shadow-xl hover:shadow-2xl transition-all text-left group transform hover:scale-105"
           >
-            <div className="flex items-start justify-between mb-4">
-              <div className="text-5xl">💰</div>
+            <div className="flex items-start justify-between mb-6">
+              <div className="text-6xl">💰</div>
               {stats.pendingAllowances > 0 && (
-                <span className="bg-blue-500 text-white px-3 py-1 rounded-full text-xs font-bold">
+                <span className="bg-white text-blue-600 px-4 py-2 rounded-full text-sm font-bold shadow-lg">
                   {stats.pendingAllowances}件
                 </span>
               )}
             </div>
-            <h3 className="text-2xl font-bold text-slate-800 mb-2 group-hover:text-blue-600 transition">
-              手当承認
+            <h3 className="text-3xl font-extrabold text-white mb-3">
+              手当管理
             </h3>
-            <p className="text-slate-500 text-sm">
-              部活動手当の申請を確認・承認します
+            <p className="text-blue-100 text-sm mb-4">
+              部活動手当の承認・集計・CSV出力・設定
             </p>
+            <div className="text-xs text-blue-200 bg-blue-700/30 px-3 py-2 rounded-lg inline-block">
+              担当：友野・武田事務長
+            </div>
           </button>
 
-          {/* 勤務表承認 */}
+          {/* 勤務表管理 */}
           <button 
             onClick={() => router.push('/admin/schedules')}
-            className="bg-white p-8 rounded-2xl shadow-md hover:shadow-xl transition-all text-left group border-2 border-transparent hover:border-green-500"
+            className="bg-gradient-to-br from-green-500 to-green-600 p-10 rounded-3xl shadow-xl hover:shadow-2xl transition-all text-left group transform hover:scale-105"
           >
-            <div className="flex items-start justify-between mb-4">
-              <div className="text-5xl">⏰</div>
+            <div className="flex items-start justify-between mb-6">
+              <div className="text-6xl">⏰</div>
               {stats.pendingSchedules > 0 && (
-                <span className="bg-green-500 text-white px-3 py-1 rounded-full text-xs font-bold">
+                <span className="bg-white text-green-600 px-4 py-2 rounded-full text-sm font-bold shadow-lg">
                   {stats.pendingSchedules}件
                 </span>
               )}
             </div>
-            <h3 className="text-2xl font-bold text-slate-800 mb-2 group-hover:text-green-600 transition">
-              勤務表承認
+            <h3 className="text-3xl font-extrabold text-white mb-3">
+              勤務表管理
             </h3>
-            <p className="text-slate-500 text-sm">
-              月次の勤務パターンを確認・承認します
+            <p className="text-green-100 text-sm mb-4">
+              勤務パターンの承認・カレンダー設定・集計
             </p>
+            <div className="text-xs text-green-200 bg-green-700/30 px-3 py-2 rounded-lg inline-block">
+              担当：小松・武田事務長
+            </div>
           </button>
 
-          {/* 休暇承認 */}
+          {/* 休暇管理 */}
           <button 
             onClick={() => router.push('/admin/leaves')}
-            className="bg-white p-8 rounded-2xl shadow-md hover:shadow-xl transition-all text-left group border-2 border-transparent hover:border-orange-500"
+            className="bg-gradient-to-br from-orange-500 to-orange-600 p-10 rounded-3xl shadow-xl hover:shadow-2xl transition-all text-left group transform hover:scale-105"
           >
-            <div className="flex items-start justify-between mb-4">
-              <div className="text-5xl">📄</div>
+            <div className="flex items-start justify-between mb-6">
+              <div className="text-6xl">📄</div>
               {stats.pendingLeaves > 0 && (
-                <span className="bg-orange-500 text-white px-3 py-1 rounded-full text-xs font-bold">
+                <span className="bg-white text-orange-600 px-4 py-2 rounded-full text-sm font-bold shadow-lg">
                   {stats.pendingLeaves}件
                 </span>
               )}
             </div>
-            <h3 className="text-2xl font-bold text-slate-800 mb-2 group-hover:text-orange-600 transition">
-              休暇承認
+            <h3 className="text-3xl font-extrabold text-white mb-3">
+              休暇届管理
             </h3>
-            <p className="text-slate-500 text-sm">
-              年休・特休等の申請を確認・承認します
+            <p className="text-orange-100 text-sm mb-4">
+              年休・特休等の申請確認・承認
             </p>
-          </button>
-
-          {/* カレンダー読込 */}
-          <button 
-            onClick={() => router.push('/admin/calendar')}
-            className="bg-white p-8 rounded-2xl shadow-md hover:shadow-xl transition-all text-left group border-2 border-transparent hover:border-purple-500"
-          >
-            <div className="flex items-start justify-between mb-4">
-              <div className="text-5xl">📅</div>
+            <div className="text-xs text-orange-200 bg-orange-700/30 px-3 py-2 rounded-lg inline-block">
+              全管理者
             </div>
-            <h3 className="text-2xl font-bold text-slate-800 mb-2 group-hover:text-purple-600 transition">
-              カレンダー管理
-            </h3>
-            <p className="text-slate-500 text-sm">
-              年間勤務予定をCSVで登録
-            </p>
-          </button>
-
-          {/* 設定 */}
-          <button 
-            onClick={() => router.push('/admin/settings')}
-            className="bg-white p-8 rounded-2xl shadow-md hover:shadow-xl transition-all text-left group border-2 border-transparent hover:border-slate-500"
-          >
-            <div className="flex items-start justify-between mb-4">
-              <div className="text-5xl">⚙️</div>
-            </div>
-            <h3 className="text-2xl font-bold text-slate-800 mb-2 group-hover:text-slate-600 transition">
-              システム設定
-            </h3>
-            <p className="text-slate-500 text-sm">
-              手当項目・金額・勤務パターン設定
-            </p>
-          </button>
-
-          {/* Excel出力 */}
-          <button 
-            onClick={() => router.push('/admin/export')}
-            className="bg-gradient-to-br from-green-500 to-green-600 p-8 rounded-2xl shadow-md hover:shadow-xl transition-all text-left group"
-          >
-            <div className="flex items-start justify-between mb-4">
-              <div className="text-5xl">📊</div>
-            </div>
-            <h3 className="text-2xl font-bold text-white mb-2">
-              Excel出力
-            </h3>
-            <p className="text-green-50 text-sm">
-              個人・全体の月次・年次レポート
-            </p>
           </button>
         </div>
 
-        {/* クイックアクセス */}
+        {/* システム情報 */}
         <div className="bg-white p-6 rounded-2xl shadow-md">
-          <h3 className="text-lg font-bold text-slate-800 mb-4">クイックアクセス</h3>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <button className="p-3 bg-slate-50 hover:bg-slate-100 rounded-lg text-sm font-bold text-slate-600 transition">
-              職員一覧
-            </button>
-            <button className="p-3 bg-slate-50 hover:bg-slate-100 rounded-lg text-sm font-bold text-slate-600 transition">
-              集計レポート
-            </button>
-            <button className="p-3 bg-slate-50 hover:bg-slate-100 rounded-lg text-sm font-bold text-slate-600 transition">
-              承認履歴
-            </button>
-            <button className="p-3 bg-slate-50 hover:bg-slate-100 rounded-lg text-sm font-bold text-slate-600 transition">
-              ヘルプ
-            </button>
+          <h3 className="text-lg font-bold text-slate-800 mb-4">システム情報</h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="bg-slate-50 p-4 rounded-lg">
+              <div className="text-sm text-slate-500 mb-1">承認待ち（合計）</div>
+              <div className="text-3xl font-bold text-slate-800">
+                {stats.pendingAllowances + stats.pendingSchedules + stats.pendingLeaves}件
+              </div>
+            </div>
+            <div className="bg-slate-50 p-4 rounded-lg">
+              <div className="text-sm text-slate-500 mb-1">アクセス権限</div>
+              <div className="text-lg font-bold text-slate-800">
+                {userRoles.length}個の管理権限
+              </div>
+            </div>
+            <div className="bg-slate-50 p-4 rounded-lg">
+              <div className="text-sm text-slate-500 mb-1">システムバージョン</div>
+              <div className="text-lg font-bold text-slate-800">
+                v2.0
+              </div>
+            </div>
           </div>
         </div>
       </div>
