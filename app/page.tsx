@@ -459,7 +459,6 @@ export default function Home() {
   }
   
   const currentPatternDetail = workPatterns.find(p => p.code === selectedPattern)
-  const hasLeave = details['leave_annual'] || LEAVE_ITEMS_TIME.some(i => details[i.key])
   
   return (
     <div className="min-h-screen bg-slate-50 pb-20">
@@ -581,19 +580,19 @@ export default function Home() {
                            {/* 時間休の場合のみ時間数入力を表示 */}
                            {leaveDuration === '時間休' && (
                                <div className="bg-yellow-50 p-3 rounded-lg border border-yellow-200">
-                                   <label className="block text-xs font-bold text-slate-700 mb-2">時間数（1〜7時間）</label>
+                                   <label className="block text-xs font-bold text-slate-700 mb-2">時間数（1〜8時間）</label>
                                    <div className="flex items-center gap-2">
                                        <input 
                                            type="number" 
                                            min="1" 
-                                           max="7" 
+                                           max="8" 
                                            value={leaveHours} 
-                                           onChange={(e) => setLeaveHours(Math.max(1, Math.min(7, parseInt(e.target.value) || 1)))}
+                                           onChange={(e) => setLeaveHours(Math.max(1, Math.min(8, parseInt(e.target.value) || 1)))}
                                            className="w-20 p-2 text-sm border rounded bg-white text-black font-bold text-center"
                                        />
                                        <span className="text-sm text-slate-600">時間</span>
                                        <div className="flex-1 flex gap-1">
-                                           {[1, 2, 3, 4, 5, 6, 7].map(h => (
+                                           {[1, 2, 3, 4, 5, 6, 7, 8].map(h => (
                                                <button
                                                    key={h}
                                                    type="button"
@@ -625,19 +624,6 @@ export default function Home() {
                    ) : (
                        <div className="text-xs text-slate-400">※ロック中のため編集できません</div>
                    )}
-                </div>
-              )}
-            </div>
-
-            <div className={`bg-white rounded-xl border transition-all ${isSchedLocked ? 'border-gray-200 opacity-60 pointer-events-none bg-gray-50' : openCategory === 'leave' ? 'border-green-400 ring-2 ring-green-100' : hasLeave ? 'border-green-300' : 'border-slate-200'}`}>
-              <button disabled={isSchedLocked} type="button" onClick={() => setOpenCategory(openCategory === 'leave' ? null : 'leave')} className="w-full flex justify-between items-center p-3 text-left">
-                 <div className="flex items-center gap-2"><span className="text-lg">⏱</span><span className={`text-xs font-bold ${hasLeave ? 'text-green-600' : 'text-black'}`}>時間休・その他 {isSchedLocked && '(編集不可)'}</span></div>
-                <span className="text-slate-400 text-xs">{openCategory === 'leave' ? '▲ 閉じる' : hasLeave ? '詳細あり ▼' : '追加する +'}</span>
-              </button>
-              {(openCategory === 'leave' || hasLeave) && (
-                <div className="p-3 pt-0 border-t border-slate-100 bg-green-50/30 rounded-b-xl space-y-3">
-                   {openCategory === 'leave' && (<div className="mb-2"><div className="flex flex-wrap gap-2">{LEAVE_ITEMS_TIME.map(item => (<button key={item.key} type="button" onClick={() => updateDetail(item.key, details[item.key] ? '' : '00:00')} className={`text-xs px-2 py-1 rounded border font-bold ${details[item.key] ? 'bg-green-500 text-white border-green-600' : 'bg-white text-black border-slate-300'}`}>{item.label}</button>))}</div></div>)}
-                   {LEAVE_ITEMS_TIME.filter(i => details[i.key] !== undefined).map(item => (<div key={item.key} className="flex items-center gap-2 animate-fadeIn"><label className="text-xs font-bold text-black w-24 truncate">{item.label}</label><input type="text" placeholder="時間" value={details[item.key] || ''} onChange={(e) => updateDetail(item.key, e.target.value)} className="flex-1 p-2 rounded border border-slate-300 text-sm text-black font-bold" /><button type="button" onClick={() => updateDetail(item.key, '')} className="text-slate-400 hover:text-red-500">×</button></div>))}
                 </div>
               )}
             </div>
@@ -691,30 +677,47 @@ export default function Home() {
                 </div>
                 {activityId && (
                 <>
-                    <div className="grid grid-cols-2 gap-2 mt-2">
-                        <div>
-                            <label className="block text-xs font-bold text-black mb-1">行き先（区分）</label>
-                            <select 
-                                disabled={isAllowLocked} 
-                                value={destinationId} 
-                                onChange={(e) => setDestinationId(e.target.value)} 
-                                className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-black font-bold"
-                            >
-                                {DESTINATIONS.map(d => <option key={d.id} value={d.id}>{d.label}</option>)}
-                            </select>
-                        </div>
-                        <div>
-                            <label className="block text-xs font-bold text-black mb-1">詳細</label>
+                    {/* 「その他」選択時は内容入力欄を全幅で表示 */}
+                    {activityId === 'OTHER' ? (
+                        <div className="mt-2">
+                            <label className="block text-xs font-bold text-red-600 mb-1">具体的な内容（必須）</label>
                             <input 
                                 disabled={isAllowLocked} 
                                 type="text" 
-                                placeholder="例: 県体育館" 
+                                placeholder="例: 非常災害による緊急対応" 
                                 value={destinationDetail} 
                                 onChange={(e) => setDestinationDetail(e.target.value)} 
-                                className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-black font-bold" 
+                                className="w-full bg-white p-3 rounded-lg border border-red-200 text-xs text-black font-bold" 
+                                required
                             />
+                            <div className="text-xs text-slate-500 mt-1">※「その他」を選択した場合は、具体的な業務内容を必ず記入してください。</div>
                         </div>
+                    ) : (
+                    <div className="grid grid-cols-2 gap-2 mt-2">
+                            <div>
+                                <label className="block text-xs font-bold text-black mb-1">行き先（区分）</label>
+                                <select 
+                                    disabled={isAllowLocked} 
+                                    value={destinationId} 
+                                    onChange={(e) => setDestinationId(e.target.value)} 
+                                    className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-black font-bold"
+                                >
+                                    {DESTINATIONS.map(d => <option key={d.id} value={d.id}>{d.label}</option>)}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-black mb-1">詳細</label>
+                                <input 
+                                    disabled={isAllowLocked} 
+                                    type="text" 
+                                    placeholder="例: 県体育館" 
+                                    value={destinationDetail} 
+                                    onChange={(e) => setDestinationDetail(e.target.value)} 
+                                    className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-black font-bold" 
+                                />
+                            </div>
                     </div>
+                    )}
                     
                     {/* 運転・宿泊フラグ */}
                     <div className="flex gap-3 mt-2">
@@ -774,7 +777,7 @@ export default function Home() {
                                 }
                                 if (activityId === 'G') return '研修旅行等引率: 3,400円'
                                 if (activityId === 'H') return '宿泊指導: 2,400円'
-                                if (activityId === 'DISASTER') return '非常災害: 6,000円'
+                                if (activityId === 'OTHER') return 'その他: 6,000円'
                                 return '計算中...'
                             })()}
                         </div>

@@ -10,10 +10,10 @@ export const ACTIVITY_TYPES = [
     { id: 'F', label: 'F:合宿（部活動指導）', requiresHoliday: false },
     { id: 'G', label: 'G:研修旅行等引率', requiresHoliday: false },
     { id: 'H', label: 'H:宿泊指導', requiresHoliday: false },
-    { id: 'DISASTER', label: '非常災害', requiresHoliday: false },
-]
-
-export const DESTINATIONS = [
+    { id: 'OTHER', label: 'その他', requiresHoliday: false },
+  ]
+  
+  export const DESTINATIONS = [
     { id: 'kannai', label: '管内（庄内・新庄最上）' },
     { id: 'kennai_short', label: '県内（片道120km未満）' },
     { id: 'kennai_long', label: '県内（片道120km以上）' },
@@ -30,14 +30,14 @@ export const DESTINATIONS = [
  * @param isHalfDay 半日かどうか（指定大会用）
  * @returns 手当金額
  */
-export const calculateAmount = (
+  export const calculateAmount = (
     activityId: string,
     isDriving: boolean,
     destinationId: string,
     isWorkDay: boolean,
     isAccommodation: boolean = false,
     isHalfDay: boolean = false
-): number => {
+  ): number => {
     // A. 休日部活（1日）
     if (activityId === 'A') {
         if (isWorkDay) return 0 // 勤務日は支給なし
@@ -92,10 +92,10 @@ export const calculateAmount = (
             // 運転ありの場合
             switch (destinationId) {
                 case 'kannai': // 管内
-                    return 2400
                 case 'kennai_short': // 県内（片道120km未満）
-                    return 7500
+                    return 2400
                 case 'kennai_long': // 県内（片道120km以上）
+                    return 7500
                 case 'kengai': // 県外
                     return 15000
                 default:
@@ -121,6 +121,10 @@ export const calculateAmount = (
                 }
                 return 5100
             case 'kennai_long': // 県内（片道120km以上）
+                if (isAccommodation) {
+                    return 12600 + 2400 // 運転 + 宿泊
+                }
+                return 7500
             case 'kengai': // 県外
                 if (isAccommodation) {
                     return 12600 + 2400 // 運転 + 宿泊
@@ -141,8 +145,8 @@ export const calculateAmount = (
         return 2400
     }
 
-    // 非常災害
-    if (activityId === 'DISASTER') {
+    // その他（非常災害など）
+    if (activityId === 'OTHER') {
         return 6000
     }
 
@@ -182,7 +186,7 @@ export const getActivityDescription = (activityId: string): string => {
         'F': '合宿での部活動指導 - 休日/勤務日・運転により変動',
         'G': '研修旅行等の引率 - 3,400円',
         'H': '宿泊指導 - 2,400円',
-        'DISASTER': '非常災害時の業務 - 6,000円'
+        'OTHER': 'その他の業務 - 6,000円'
     }
     return descriptions[activityId] || ''
 }
