@@ -42,6 +42,9 @@ export default function AdminPage() {
   const [schedules, setSchedules] = useState<any[]>([])
   const [aggregatedData, setAggregatedData] = useState<any[]>([])
   
+  // ★追加: 休暇申請リスト
+  const [pendingLeaves, setPendingLeaves] = useState<any[]>([])
+
   const [userProfiles, setUserProfiles] = useState<Record<string, string>>({})
   const [patternDefs, setPatternDefs] = useState<Record<string, {start:string, end:string}>>({})
   
@@ -69,6 +72,7 @@ export default function AdminPage() {
       setIsAdmin(true)
       fetchData(selectedMonth)
       fetchMasters()
+      fetchPendingLeaves() // ★休暇申請取得
     }
     checkAdmin()
   }, [])
@@ -128,6 +132,25 @@ export default function AdminPage() {
     const tMap: Record<string, {start:string, end:string}> = {}
     patterns?.forEach((p: any) => tMap[p.code] = { start: p.start_time, end: p.end_time })
     setPatternDefs(tMap)
+  }
+
+  // ★追加: 承認待ち休暇申請の取得
+  const fetchPendingLeaves = async () => {
+      const { data } = await supabase.from('leave_applications')
+        .select('*')
+        .eq('status', 'pending')
+        .order('date')
+      setPendingLeaves(data || [])
+  }
+
+  // ★追加: 休暇申請の承認・却下
+  const handleLeaveDecision = async (id: number, decision: 'approved' | 'rejected') => {
+      if (!confirm(decision === 'approved' ? '承認しますか？' : '却下しますか？')) return
+      await supabase.from('leave_applications').update({ 
+          status: decision,
+          approved_at: new Date().toISOString()
+      }).eq('id', id)
+      fetchPendingLeaves() // リスト更新
   }
 
   const addTime = (curr: number, timeStr: string | null) => {
@@ -213,7 +236,6 @@ export default function AdminPage() {
     const y = selectedMonth.getFullYear()
     const m = selectedMonth.getMonth() + 1
     const rows: any[] = []
-    
     aggregatedData.forEach(user => {
         let header = `【${user.name}】`
         if (user.allowStatus === 'approved') {
@@ -307,15 +329,12 @@ export default function AdminPage() {
     return ws
   }
 
-  // ★修正: CSV実行処理（ファイルを選んでボタンを押す形式）
   const processUpload = async (type: 'master' | 'patterns') => {
     const file = type === 'master' ? masterFile : patternFile
     if (!file) { alert('ファイルを選択してください'); return }
     if (!confirm('データを登録しますか？既存データは更新されます。')) return
-
     setUploading(true)
     const reader = new FileReader()
-    
     reader.onload = async (evt) => {
         try {
             const data = new Uint8Array(evt.target?.result as ArrayBuffer)
@@ -324,7 +343,6 @@ export default function AdminPage() {
             const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][]
             let count = 0
             const cleanRows = rows.filter(row => row.length > 0)
-
             for (const row of cleanRows) {
                 if (type === 'master') {
                     let dateStr = String(row[0]).replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/\//g, '-')
@@ -337,10 +355,8 @@ export default function AdminPage() {
                 }
             }
             alert(`${count}件のデータを登録しました！`)
-            if(type === 'master') setMasterFile(null)
-            else setPatternFile(null)
-            fetchMasters()
-            fetchData(selectedMonth)
+            if(type === 'master') setMasterFile(null); else setPatternFile(null)
+            fetchMasters(); fetchData(selectedMonth)
         } catch (e: any) { alert('読込エラー: ' + e.message) } finally { setUploading(false) }
     }
     reader.readAsArrayBuffer(file)
@@ -359,6 +375,34 @@ export default function AdminPage() {
 
       <div className="max-w-[95%] mx-auto p-6 space-y-8">
         
+        {/* ★ここ: 承認待ち休暇申請リスト */}
+        {pendingLeaves.length > 0 && (
+            <div className="bg-orange-50 border-2 border-orange-200 p-4 rounded-xl shadow-lg animate-bounce-subtle">
+                <h2 className="font-bold text-orange-800 text-lg mb-2 flex items-center">
+                    <span className="text-2xl mr-2">📣</span> 承認待ちの休暇届 ({pendingLeaves.length}件)
+                </h2>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {pendingLeaves.map((leave) => {
+                        const name = userList.find(u => u.id === leave.user_id)?.email || '不明' // IDからメアド引く簡易ロジック
+                        const displayName = userProfiles[name] || name // メアドから名前引く
+                        return (
+                            <div key={leave.id} className="bg-white p-3 rounded-lg shadow border border-orange-200 flex flex-col gap-1">
+                                <div className="font-bold text-slate-700">{leave.date.slice(5)} {displayName}</div>
+                                <div className="text-sm font-bold text-slate-900 bg-slate-100 px-2 py-1 rounded inline-block w-fit">
+                                    {leave.leave_type} ({leave.duration})
+                                </div>
+                                <div className="text-xs text-slate-500">{leave.reason || '(理由なし)'}</div>
+                                <div className="flex gap-2 mt-2">
+                                    <button onClick={() => handleLeaveDecision(leave.id, 'approved')} className="flex-1 bg-green-600 text-white text-xs font-bold py-2 rounded hover:bg-green-700">承認</button>
+                                    <button onClick={() => handleLeaveDecision(leave.id, 'rejected')} className="flex-1 bg-red-200 text-red-800 text-xs font-bold py-2 rounded hover:bg-red-300">却下</button>
+                                </div>
+                            </div>
+                        )
+                    })}
+                </div>
+            </div>
+        )}
+
         <div className="flex flex-col md:flex-row justify-between items-center gap-4 bg-white p-4 rounded-xl shadow border border-slate-200">
           <div className="flex items-center gap-4">
             <button onClick={() => handleMonthChange(-1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold">‹</button>
@@ -386,7 +430,6 @@ export default function AdminPage() {
             <button onClick={downloadAnnualScheduleExcel} disabled={downloading} className="bg-green-800 text-white px-5 py-2 rounded-lg text-sm font-bold hover:bg-green-900 shadow flex items-center gap-2">{downloading ? '⏳ 出力中...' : '📅 年間 勤務表 (4月-3月)'}</button>
         </div>
 
-        {/* テーブル表示部分は省略せずそのまま記述 */}
         {loading ? <div className="text-center py-20 text-slate-500 font-bold animate-pulse">データを集計中...</div> : (
           <div className="bg-white rounded-xl shadow overflow-hidden border border-slate-200">
             {viewMode === 'allowance' && (
@@ -462,17 +505,13 @@ export default function AdminPage() {
                 <h3 className="font-bold text-slate-700 mb-4 flex items-center gap-2">📅 ① カレンダー予定登録</h3>
                 <p className="text-xs text-slate-500 mb-4">全員の予定を一括登録（日付, パターン）</p>
                 <input type="file" accept=".csv" onChange={(e) => setMasterFile(e.target.files?.[0] || null)} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
-                <button onClick={() => processUpload('master')} disabled={!masterFile || uploading} className="mt-4 w-full bg-blue-600 text-white font-bold py-3 rounded-lg shadow-md hover:bg-blue-700 active:scale-95 active:bg-blue-800 transition-all disabled:opacity-50 disabled:active:scale-100">
-                    登録を実行する
-                </button>
+                <button onClick={() => processUpload('master')} disabled={!masterFile || uploading} className="mt-4 w-full bg-blue-600 text-white font-bold py-3 rounded-lg shadow-md hover:bg-blue-700 active:scale-95 active:bg-blue-800 transition-all disabled:opacity-50 disabled:active:scale-100">登録を実行する</button>
             </div>
             <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200">
                 <h3 className="font-bold text-slate-700 mb-4 flex items-center gap-2">⏰ ② 勤務時間定義</h3>
                 <p className="text-xs text-slate-500 mb-4">A=8:15...を定義（コード, 開始, 終了）</p>
                 <input type="file" accept=".csv" onChange={(e) => setPatternFile(e.target.files?.[0] || null)} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
-                <button onClick={() => processUpload('patterns')} disabled={!patternFile || uploading} className="mt-4 w-full bg-blue-600 text-white font-bold py-3 rounded-lg shadow-md hover:bg-blue-700 active:scale-95 active:bg-blue-800 transition-all disabled:opacity-50 disabled:active:scale-100">
-                    登録を実行する
-                </button>
+                <button onClick={() => processUpload('patterns')} disabled={!patternFile || uploading} className="mt-4 w-full bg-blue-600 text-white font-bold py-3 rounded-lg shadow-md hover:bg-blue-700 active:scale-95 active:bg-blue-800 transition-all disabled:opacity-50 disabled:active:scale-100">登録を実行する</button>
             </div>
         </div>
       </div>
