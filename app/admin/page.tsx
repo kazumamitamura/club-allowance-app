@@ -3,464 +3,522 @@
 import { useEffect, useState } from 'react'
 import { createClient } from '@/utils/supabase/client'
 import { useRouter } from 'next/navigation'
-import * as XLSX from 'xlsx'
+import Calendar from 'react-calendar'
+import 'react-calendar/dist/Calendar.css'
+import { ACTIVITY_TYPES, DESTINATIONS, calculateAmount } from '@/utils/allowanceRules'
 
-const ADMIN_EMAILS = [
-  'mitamuraka@haguroko.ed.jp',
-  'tomonoem@haguroko.ed.jp'
-].map(email => email.toLowerCase())
+const ADMIN_EMAILS = ['mitamuraka@haguroko.ed.jp', 'tomonoem@haguroko.ed.jp'].map(e => e.toLowerCase())
 
-const TIME_ITEMS = [
-  { key: 'leave_hourly', label: '時間休' },
-  { key: 'overtime_weekday', label: '平日残業' },
-  { key: 'overtime_weekday2', label: '平日2' },
-  { key: 'overtime_late_night', label: '深夜' },
-  { key: 'overtime_holiday', label: '休日' },
-  { key: 'overtime_holiday_late', label: '休日深夜' },
-  { key: 'lateness', label: '遅刻' },
-  { key: 'early_leave', label: '早退' },
-  { key: 'leave_childcare', label: '育児' },
-  { key: 'leave_nursing', label: '介護' },
-  { key: 'leave_special_paid', label: '特休(有)' },
-  { key: 'leave_special_unpaid', label: '特休(無)' },
+const LEAVE_TYPES = ['年次有給休暇', '夏季休暇', '慶弔休暇', '病気休暇', '産前産後休暇', '育児休暇', '介護休暇', '職免']
+const LEAVE_DURATIONS = ['1日', '半日(午前)', '半日(午後)', '時間休']
+
+const LEAVE_ITEMS_TIME = [
+  { key: 'leave_hourly', label: '時間年休' },
+  { key: 'leave_childcare', label: '育児休暇' },
+  { key: 'leave_nursing', label: '介護休暇' },
+  { key: 'leave_special_paid', label: 'その他特休(有給)' },
+  { key: 'leave_special_unpaid', label: 'その他特休(無給)' },
   { key: 'leave_duty_exemption', label: '義務免' },
   { key: 'leave_holiday_shift', label: '休振' },
-  { key: 'leave_comp_day', label: '振代' },
+  { key: 'leave_comp_day', label: '振休・代休' },
   { key: 'leave_admin', label: '管休' },
 ]
 
-export default function AdminPage() {
+type Allowance = { id: number, user_id: string, date: string, activity_type: string, amount: number, destination_type: string, destination_detail: string, is_driving: boolean, is_accommodation: boolean }
+type WorkPattern = { id: number, code: string, start_time: string, end_time: string, description: string }
+type DailySchedule = { id: number, user_id: string, date: string, work_pattern_code: string | null, [key: string]: any }
+type SchoolCalendar = { date: string, day_type: string }
+type MasterSchedule = { date: string, work_pattern_code: string }
+type LeaveApplication = { id: number, user_id: string, date: string, leave_type: string, duration: string, reason: string, status: string }
+
+const formatDate = (date: Date) => {
+  const y = date.getFullYear()
+  const m = ('00' + (date.getMonth() + 1)).slice(-2)
+  const d = ('00' + date.getDate()).slice(-2)
+  return `${y}-${m}-${d}`
+}
+
+export default function Home() {
   const router = useRouter()
   const supabase = createClient()
   
+  const [userEmail, setUserEmail] = useState('')
+  const [userId, setUserId] = useState('')
+  const [userName, setUserName] = useState('')
   const [isAdmin, setIsAdmin] = useState(false)
-  const [loading, setLoading] = useState(true)
-  const [downloading, setDownloading] = useState(false)
-  
-  const [selectedMonth, setSelectedMonth] = useState(new Date())
-  const [allowances, setAllowances] = useState<any[]>([])
-  const [schedules, setSchedules] = useState<any[]>([])
-  const [aggregatedData, setAggregatedData] = useState<any[]>([])
-  
-  const [userProfiles, setUserProfiles] = useState<Record<string, string>>({})
-  const [patternDefs, setPatternDefs] = useState<Record<string, {start:string, end:string}>>({})
-  
-  const [allowanceStatuses, setAllowanceStatuses] = useState<Record<string, any>>({})
-  const [scheduleStatuses, setScheduleStatuses] = useState<Record<string, any>>({})
 
-  const [userList, setUserList] = useState<{id: string, email: string}[]>([]) 
-  const [selectedUserId, setSelectedUserId] = useState<string>('all')
+  const [allowances, setAllowances] = useState<Allowance[]>([])
+  const [schedules, setSchedules] = useState<DailySchedule[]>([])
+  const [schoolCalendar, setSchoolCalendar] = useState<SchoolCalendar[]>([])
+  const [masterSchedules, setMasterSchedules] = useState<MasterSchedule[]>([]) 
+  const [workPatterns, setWorkPatterns] = useState<WorkPattern[]>([])
+  const [leaveApps, setLeaveApps] = useState<LeaveApplication[]>([]) // 休暇申請
   
-  const [viewMode, setViewMode] = useState<'allowance' | 'schedule'>('allowance')
-  const [uploading, setUploading] = useState(false)
+  const [allowanceStatus, setAllowanceStatus] = useState<'draft' | 'submitted' | 'approved'>('draft')
+  const [scheduleStatus, setScheduleStatus] = useState<'draft' | 'submitted' | 'approved'>('draft')
+  
+  const [selectedDate, setSelectedDate] = useState<Date>(new Date())
+  const [dayType, setDayType] = useState<string>('---')
+  const [isRegistered, setIsRegistered] = useState(false)
+  const [selectedPattern, setSelectedPattern] = useState('C')
+  const [details, setDetails] = useState<any>({})
+  
+  const [openCategory, setOpenCategory] = useState<'leave' | 'application' | null>(null)
 
-  const [masterFile, setMasterFile] = useState<File | null>(null)
-  const [patternFile, setPatternFile] = useState<File | null>(null)
+  const [showProfileModal, setShowProfileModal] = useState(false)
+  const [inputLastName, setInputLastName] = useState('')
+  const [inputFirstName, setInputFirstName] = useState('')
+
+  // 休暇申請入力用
+  const [leaveType, setLeaveType] = useState('年次有給休暇')
+  const [leaveDuration, setLeaveDuration] = useState('1日')
+  const [leaveReason, setLeaveReason] = useState('')
+  const [currentLeaveApp, setCurrentLeaveApp] = useState<LeaveApplication | null>(null)
+
+  const [activityId, setActivityId] = useState('')
+  const [destinationId, setDestinationId] = useState('school')
+  const [destinationDetail, setDestinationDetail] = useState('')
+  const [isDriving, setIsDriving] = useState(false)
+  const [isAccommodation, setIsAccommodation] = useState(false)
+  const [calculatedAmount, setCalculatedAmount] = useState(0)
+
+  // ロック判定
+  const getLockStatus = (targetDate: Date) => {
+    if (isAdmin) return { schedule: false, allowance: false }
+    const now = new Date()
+    const deadline = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 6, 0, 0, 0)
+    const isPastDeadline = now >= deadline
+    const currentViewMonth = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, '0')}`
+    const targetMonth = `${targetDate.getFullYear()}-${String(targetDate.getMonth() + 1).padStart(2, '0')}`
+    const isTargetMonth = currentViewMonth === targetMonth
+    return {
+        schedule: isPastDeadline || (isTargetMonth && scheduleStatus !== 'draft'),
+        allowance: isPastDeadline || (isTargetMonth && allowanceStatus !== 'draft')
+    }
+  }
+
+  const { schedule: isSchedLocked, allowance: isAllowLocked } = getLockStatus(selectedDate)
 
   useEffect(() => {
-    const checkAdmin = async () => {
+    const init = async () => {
       const { data: { user } } = await supabase.auth.getUser()
-      if (!user || !ADMIN_EMAILS.includes(user.email?.toLowerCase() || '')) {
-        alert('管理者権限がありません')
-        router.push('/')
-        return
-      }
-      setIsAdmin(true)
-      fetchData(selectedMonth)
-      fetchMasters()
+      if (!user) { router.push('/login'); return }
+      setUserEmail(user.email || '')
+      setUserId(user.id)
+      if (ADMIN_EMAILS.includes(user.email?.toLowerCase() || '')) setIsAdmin(true)
+      
+      fetchProfile(user.email || '')
+      fetchData(user.id)
+      fetchSchoolCalendar()
+      fetchMasterSchedules()
+      fetchApplicationStatus(user.id, selectedDate)
+      
+      const { data } = await supabase.from('work_patterns').select('*').order('code')
+      if (data) setWorkPatterns(data)
     }
-    checkAdmin()
+    init()
   }, [])
 
-  useEffect(() => {
-    aggregateData()
-  }, [allowances, schedules, selectedUserId, allowanceStatuses, scheduleStatuses])
-
-  const handleMonthChange = (offset: number) => {
-    const newDate = new Date(selectedMonth)
-    newDate.setMonth(newDate.getMonth() + offset)
-    setSelectedMonth(newDate)
-    fetchData(newDate)
+  const fetchProfile = async (email: string) => {
+      const { data } = await supabase.from('user_profiles').select('full_name').eq('email', email).single()
+      if (data?.full_name) setUserName(data.full_name)
   }
 
-  const fetchData = async (date: Date) => {
-    setLoading(true)
-    const y = date.getFullYear()
-    const m = date.getMonth() + 1
-    const startDate = `${y}-${String(m).padStart(2, '0')}-01`
-    const lastDay = new Date(y, m, 0).getDate()
-    const endDate = `${y}-${String(m).padStart(2, '0')}-${lastDay}`
+  const handleSaveProfile = async () => {
+      if (!inputLastName || !inputFirstName) { alert('姓と名の両方を入力してください'); return }
+      const fullName = `${inputLastName.trim()} ${inputFirstName.trim()}`
+      const { error } = await supabase.from('user_profiles').upsert({ email: userEmail, full_name: fullName })
+      if (error) alert('エラー: ' + error.message)
+      else { setUserName(fullName); setShowProfileModal(false); alert('氏名を登録しました！') }
+  }
 
-    const { data: allowData } = await supabase.from('allowances').select('*').gte('date', startDate).lte('date', endDate).order('date')
-    const { data: schedData } = await supabase.from('daily_schedules').select('*').gte('date', startDate).lte('date', endDate).order('date')
-    
-    const ym = `${y}-${String(m).padStart(2, '0')}`
-    const { data: appData } = await supabase.from('monthly_applications').select('*').eq('year_month', ym)
-    
-    const allowMap: Record<string, any> = {}
-    const schedMap: Record<string, any> = {}
-    appData?.forEach((a: any) => {
-        if (a.application_type === 'allowance') allowMap[a.user_id] = a
-        else schedMap[a.user_id] = a
-    })
-    setAllowanceStatuses(allowMap)
-    setScheduleStatuses(schedMap)
+  useEffect(() => { if (userId) fetchApplicationStatus(userId, selectedDate) }, [selectedDate, userId])
 
+  const fetchData = async (uid: string) => {
+    const { data: allowData } = await supabase.from('allowances').select('*').eq('user_id', uid).order('date', { ascending: false })
     setAllowances(allowData || [])
+    const { data: schedData } = await supabase.from('daily_schedules').select('*').eq('user_id', uid)
     setSchedules(schedData || [])
-
-    const uMap = new Map<string, string>()
-    allowData?.forEach((a: any) => { if(a.user_email) uMap.set(a.user_id, a.user_email) })
-    schedData?.forEach((s: any) => { if(s.user_email && !uMap.has(s.user_id)) uMap.set(s.user_id, s.user_email) })
-    setUserList(Array.from(uMap.entries()).map(([id, email]) => ({ id, email })))
-
-    setLoading(false)
+    // 休暇申請データ取得
+    const { data: leaveData } = await supabase.from('leave_applications').select('*').eq('user_id', uid)
+    setLeaveApps(leaveData || [])
   }
 
-  const fetchMasters = async () => {
-    const { data: users } = await supabase.from('user_profiles').select('*')
-    const pMap: Record<string, string> = {}
-    users?.forEach((u: any) => pMap[u.email] = u.full_name)
-    setUserProfiles(pMap)
-
-    const { data: patterns } = await supabase.from('work_patterns').select('*')
-    const tMap: Record<string, {start:string, end:string}> = {}
-    patterns?.forEach((p: any) => tMap[p.code] = { start: p.start_time, end: p.end_time })
-    setPatternDefs(tMap)
+  const fetchSchoolCalendar = async () => {
+    const { data } = await supabase.from('school_calendar').select('*'); setSchoolCalendar(data || [])
+  }
+  const fetchMasterSchedules = async () => {
+    const { data } = await supabase.from('master_schedules').select('*'); setMasterSchedules(data || [])
   }
 
-  const addTime = (curr: number, timeStr: string | null) => {
-    if (!timeStr || !timeStr.includes(':')) return curr
-    const [hStr, mStr] = timeStr.split(':')
-    const h = parseInt(hStr, 10); const m = parseInt(mStr, 10)
-    if (isNaN(h) || isNaN(m)) return curr
-    return curr + (h * 60) + m
+  const fetchApplicationStatus = async (uid: string, date: Date) => {
+    const ym = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+    const { data } = await supabase.from('monthly_applications').select('application_type, status').eq('user_id', uid).eq('year_month', ym)
+    const allow = data?.find(d => d.application_type === 'allowance')
+    const sched = data?.find(d => d.application_type === 'schedule')
+    setAllowanceStatus(allow?.status || 'draft')
+    setScheduleStatus(sched?.status || 'draft')
   }
 
-  const formatMinutes = (minutes: number) => {
-    if (!minutes || minutes === 0 || isNaN(minutes)) return ''
-    const h = Math.floor(minutes / 60)
-    const m = minutes % 60
-    return `${h}:${String(m).padStart(2, '0')}`
-  }
+  useEffect(() => {
+    const updateDayInfo = async () => {
+      const dateStr = formatDate(selectedDate)
+      const calData = schoolCalendar.find(c => c.date === dateStr)
+      const type = calData?.day_type || (selectedDate.getDay() % 6 === 0 ? '休日(仮)' : '勤務日(仮)')
+      setDayType(type)
+      
+      const masterSchedule = masterSchedules.find(m => m.date === dateStr)
+      const defaultPattern = masterSchedule?.work_pattern_code || (type.includes('休日') || type.includes('週休') ? '' : 'C')
+      const scheduleData = schedules.find(s => s.date === dateStr)
+      
+      if (scheduleData) {
+        setIsRegistered(true)
+        setSelectedPattern(scheduleData.work_pattern_code || defaultPattern)
+        const newDetails: any = {}
+        if (scheduleData.leave_annual) newDetails['leave_annual'] = scheduleData.leave_annual
+        LEAVE_ITEMS_TIME.forEach(i => { if (scheduleData[i.key]) newDetails[i.key] = scheduleData[i.key] })
+        setDetails(newDetails)
+      } else {
+        setIsRegistered(false); setSelectedPattern(defaultPattern); setDetails({})
+      }
 
-  const aggregateData = () => {
-    const targets = selectedUserId === 'all' ? userList : userList.filter(u => u.id === selectedUserId)
-    const result = targets.map(user => {
-        const myAllowances = allowances.filter(a => a.user_id === user.id)
-        const mySchedules = schedules.filter(s => s.user_id === user.id)
-        const allowApp = allowanceStatuses[user.id] || {}
-        const schedApp = scheduleStatuses[user.id] || {}
+      // 休暇申請データの反映
+      const leaveApp = leaveApps.find(l => l.date === dateStr)
+      setCurrentLeaveApp(leaveApp || null)
+      if (leaveApp) {
+          setLeaveType(leaveApp.leave_type)
+          setLeaveDuration(leaveApp.duration)
+          setLeaveReason(leaveApp.reason || '')
+      } else {
+          // 新規の場合はデフォルト
+          setLeaveType('年次有給休暇')
+          setLeaveDuration('1日')
+          setLeaveReason('')
+      }
 
-        const row: any = {
-            id: user.id,
-            name: userProfiles[user.email] || user.email, 
-            email: user.email,
-            allowStatus: allowApp.status || 'draft',
-            schedStatus: schedApp.status || 'draft',
-            allowApprovedAt: allowApp.approved_at,
-            schedApprovedAt: schedApp.approved_at,
-            total_amount: myAllowances.reduce((sum, a) => sum + a.amount, 0),
-            allowance_count: myAllowances.length,
-            allowance_details: myAllowances,
-            patterns: {},
-            annual_leave_start: 20,
-            annual_leave_used: 0,
-            annual_leave_remain: 20,
-            time_totals: {},
-            schedule_details: mySchedules
-        }
-
-        TIME_ITEMS.forEach(t => row.time_totals[t.key] = 0)
-        mySchedules.forEach(s => {
-            if (s.work_pattern_code) row.patterns[s.work_pattern_code] = (row.patterns[s.work_pattern_code] || 0) + 1
-            if (s.leave_annual === '1日') row.annual_leave_used += 1.0
-            if (s.leave_annual === '半日') row.annual_leave_used += 0.5
-            TIME_ITEMS.forEach(t => { if (s[t.key]) row.time_totals[t.key] = addTime(row.time_totals[t.key], s[t.key]) })
-        })
-        row.annual_leave_remain = row.annual_leave_start - row.annual_leave_used
-        return row
-    })
-    setAggregatedData(result)
-  }
-
-  const updateStatus = async (userId: string, type: 'allowance' | 'schedule', newStatus: string) => {
-    const actionName = newStatus === 'approved' ? '承認' : '差し戻し'
-    if (!confirm(`${actionName}しますか？`)) return
-    const ym = `${selectedMonth.getFullYear()}-${String(selectedMonth.getMonth() + 1).padStart(2, '0')}`
-    await supabase.from('monthly_applications').upsert({
-        user_id: userId, year_month: ym, application_type: type,
-        status: newStatus, approved_at: newStatus === 'approved' ? new Date().toISOString() : null
-    })
-    fetchData(selectedMonth)
-  }
-
-  const handleDeleteAllowance = async (id: number) => {
-    if (!confirm('削除しますか？')) return
-    await supabase.from('allowances').delete().eq('id', id)
-    fetchData(selectedMonth)
-  }
-
-  const fmtDate = (iso: string) => {
-      if (!iso) return ''
-      const d = new Date(iso)
-      return `${d.getFullYear()}/${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')}`
-  }
-
-  const downloadAllowanceExcel = () => {
-    const wb = XLSX.utils.book_new()
-    const y = selectedMonth.getFullYear()
-    const m = selectedMonth.getMonth() + 1
-    const rows: any[] = []
-    
-    aggregatedData.forEach(user => {
-        let header = `【${user.name}】`
-        if (user.allowStatus === 'approved') {
-            header += `  [承認済: ${fmtDate(user.allowApprovedAt)}  承認者: 友野・武田事務長]`
-        }
-        rows.push({ "日付": header })
-        if (user.allowance_details.length > 0) {
-            const sorted = [...user.allowance_details].sort((a,b) => a.date.localeCompare(b.date))
-            sorted.forEach((d: any) => {
-                rows.push({ "氏名": user.name, "日付": d.date, "業務内容": d.activity_type, "区分": d.destination_type || '-', "詳細": d.destination_detail || '-', "金額": d.amount })
-            })
-            rows.push({ "氏名": "合計", "金額": user.total_amount })
-        } else { rows.push({ "氏名": "支給なし" }) }
-        rows.push({}) 
-    })
-    const ws = XLSX.utils.json_to_sheet(rows)
-    ws['!cols'] = [{ wch: 30 }, { wch: 12 }, { wch: 15 }, { wch: 15 }, { wch: 20 }, { wch: 10 }]
-    XLSX.utils.book_append_sheet(wb, ws, "手当明細")
-    XLSX.writeFile(wb, `特殊勤務手当_${y}年${m}月.xlsx`)
-  }
-
-  const downloadMonthlyScheduleExcel = () => {
-    const wb = XLSX.utils.book_new()
-    const y = selectedMonth.getFullYear()
-    const m = selectedMonth.getMonth() + 1
-    const ws = createScheduleSheet(y, m, schedules)
-    XLSX.utils.book_append_sheet(wb, ws, `${m}月`)
-    XLSX.writeFile(wb, `勤務実績表_${y}年${m}月.xlsx`)
-  }
-
-  const downloadAnnualScheduleExcel = async () => {
-    if (!confirm('出力しますか？')) return
-    setDownloading(true)
-    try {
-        const wb = XLSX.utils.book_new()
-        const currentY = selectedMonth.getFullYear()
-        const currentM = selectedMonth.getMonth() + 1
-        const fiscalYear = currentM < 4 ? currentY - 1 : currentY
-        const startDate = `${fiscalYear}-04-01`
-        const endDate = `${fiscalYear + 1}-03-31`
-        const { data: annualSchedules } = await supabase.from('daily_schedules').select('*').gte('date', startDate).lte('date', endDate).order('date')
-        const safeSchedules = annualSchedules || []
-        for (let i = 0; i < 12; i++) {
-            const targetMonthIndex = 3 + i 
-            const d = new Date(fiscalYear, targetMonthIndex, 1)
-            const sheetYear = d.getFullYear()
-            const sheetMonth = d.getMonth() + 1
-            const monthlyData = safeSchedules.filter((s: any) => { const sDate = new Date(s.date); return sDate.getFullYear() === sheetYear && (sDate.getMonth() + 1) === sheetMonth })
-            const ws = createScheduleSheet(sheetYear, sheetMonth, monthlyData)
-            XLSX.utils.book_append_sheet(wb, ws, `${sheetMonth}月`)
-        }
-        XLSX.writeFile(wb, `勤務実績表_${fiscalYear}年度.xlsx`)
-    } catch (e) { alert('出力エラー'); console.error(e) } finally { setDownloading(false) }
-  }
-
-  const createScheduleSheet = (year: number, month: number, sourceData: any[]) => {
-    const lastDay = new Date(year, month, 0).getDate()
-    const allDates: string[] = []
-    for (let d = 1; d <= lastDay; d++) { allDates.push(`${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`) }
-    const rows: any[] = []
-    const targets = selectedUserId === 'all' ? userList : userList.filter(u => u.id === selectedUserId)
-
-    targets.forEach(u => {
-        const name = userProfiles[u.email] || u.email
-        let header = `■ 勤務実績表: ${name} (${year}年${month}月)`
-        const isCurrentViewMonth = year === selectedMonth.getFullYear() && month === (selectedMonth.getMonth() + 1)
-        if (isCurrentViewMonth && scheduleStatuses[u.id]?.status === 'approved') {
-            const date = scheduleStatuses[u.id].approved_at
-            header += `  [承認済: ${fmtDate(date)}  承認者: 小松・武田事務長]`
-        }
-        rows.push({ "日付": header })
-        const headerRow: any = { "日付": "日付", "氏名": "氏名", "勤務形態": "勤務形態", "開始時間": "開始時間", "終了時間": "終了時間", "年休": "年休" }
-        TIME_ITEMS.forEach(t => headerRow[t.label] = t.label)
-        rows.push(headerRow)
-        allDates.forEach(dateStr => {
-            const sched = sourceData.find((s: any) => s.user_id === u.id && s.date === dateStr)
-            const pattern = sched?.work_pattern_code
-            const times = pattern ? patternDefs[pattern] : null
-            const row: any = {
-                "日付": dateStr, "氏名": name, "勤務形態": pattern || '',
-                "開始時間": times ? times.start.slice(0, 5) : '', "終了時間": times ? times.end.slice(0, 5) : '',
-                "年休": sched?.leave_annual || ''
-            }
-            TIME_ITEMS.forEach(t => { const raw = sched ? sched[t.key] : ''; row[t.label] = raw })
-            rows.push(row)
-        })
-        rows.push({}); rows.push({})
-    })
-    const ws = XLSX.utils.json_to_sheet(rows, { skipHeader: true })
-    ws['!cols'] = [{ wch: 12 }, { wch: 20 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, ...TIME_ITEMS.map(() => ({ wch: 10 }))]
-    return ws
-  }
-
-  const processUpload = async (type: 'master' | 'patterns') => {
-    const file = type === 'master' ? masterFile : patternFile
-    if (!file) { alert('ファイルを選択してください'); return }
-    if (!confirm('データを登録しますか？既存データは更新されます。')) return
-    setUploading(true)
-    const reader = new FileReader()
-    reader.onload = async (evt) => {
-        try {
-            const data = new Uint8Array(evt.target?.result as ArrayBuffer)
-            const wb = XLSX.read(data, { type: 'array' })
-            const sheet = wb.Sheets[wb.SheetNames[0]]
-            const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as any[][]
-            let count = 0
-            const cleanRows = rows.filter(row => row.length > 0)
-            for (const row of cleanRows) {
-                if (type === 'master') {
-                    let dateStr = String(row[0]).replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0)).replace(/\//g, '-')
-                    const code = row[1]
-                    if (!isNaN(Number(row[0])) && Number(row[0]) > 40000) { const d = new Date((Number(row[0]) - 25569) * 86400 * 1000); dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}` }
-                    if (dateStr.match(/^\d{4}-\d{1,2}-\d{1,2}$/)) { const [y, m, d] = dateStr.split('-'); const fmtDate = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`; await supabase.from('master_schedules').upsert({ date: fmtDate, work_pattern_code: code }, { onConflict: 'date' }); count++ }
-                } else if (type === 'patterns') {
-                    const code = row[0]; const start = row[1]; const end = row[2]
-                    if (code && start && end) { await supabase.from('work_patterns').upsert({ code, start_time: start, end_time: end }, { onConflict: 'code' }); count++ }
-                }
-            }
-            alert(`${count}件のデータを登録しました！`)
-            if(type === 'master') setMasterFile(null); else setPatternFile(null)
-            fetchMasters(); fetchData(selectedMonth)
-        } catch (e: any) { alert('読込エラー: ' + e.message) } finally { setUploading(false) }
+      const allowance = allowances.find(a => a.date === dateStr)
+      if (allowance) {
+        setActivityId(allowance.activity_type === allowance.activity_type ? (ACTIVITY_TYPES.find(t => t.label === allowance.activity_type)?.id || allowance.activity_type) : '')
+        setDestinationId(DESTINATIONS.find(d => d.label === allowance.destination_type)?.id || 'school')
+        setDestinationDetail(allowance.destination_detail || '')
+        setIsDriving(allowance.is_driving); setIsAccommodation(allowance.is_accommodation)
+      } else {
+        setActivityId(''); setDestinationId('school'); setDestinationDetail(''); setIsDriving(false); setIsAccommodation(false)
+      }
     }
-    reader.readAsArrayBuffer(file)
+    updateDayInfo()
+  }, [selectedDate, allowances, schedules, schoolCalendar, masterSchedules, leaveApps])
+
+  useEffect(() => {
+    const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
+    if (!activityId) { setCalculatedAmount(0); return }
+    const amt = calculateAmount(activityId, isDriving, destinationId, isWorkDay)
+    setCalculatedAmount(amt)
+  }, [activityId, isDriving, destinationId, dayType])
+
+  const updateDetail = (key: string, value: string) => {
+    setDetails((prev: any) => { const next = { ...prev }; if (value === '') delete next[key]; else next[key] = value; return next })
   }
 
-  if (!isAdmin) return <div className="p-10 text-center">確認中...</div>
+  // ★休暇申請の送信（Upsert = 新規作成または更新）
+  const handleLeaveApply = async () => {
+      const dateStr = formatDate(selectedDate)
+      
+      const { error } = await supabase.from('leave_applications').upsert({
+          user_id: userId,
+          date: dateStr,
+          leave_type: leaveType,
+          duration: leaveDuration,
+          reason: leaveReason,
+          status: 'pending' // 修正した場合も「申請中」に戻すのが一般的
+      }, { onConflict: 'user_id, date' })
 
+      if (error) alert('エラー: ' + error.message)
+      else {
+          alert(currentLeaveApp ? '申請内容を修正しました！' : '休暇届を申請しました！\n（管理者の承認待ち状態です）')
+          fetchData(userId) // 再取得して画面反映
+          setOpenCategory(null)
+      }
+  }
+
+  // ★休暇申請の取り下げ（削除）
+  const handleLeaveCancel = async () => {
+      if (!currentLeaveApp) return
+      if (!confirm('この申請を取り下げますか？\n（管理者の画面からも削除されます）')) return
+      
+      const { error } = await supabase.from('leave_applications').delete().eq('id', currentLeaveApp.id)
+      
+      if (error) alert('エラー: ' + error.message)
+      else {
+          alert('申請を取り下げました。')
+          fetchData(userId) // 再取得して画面反映
+          setOpenCategory(null)
+      }
+  }
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (isSchedLocked && isAllowLocked) { alert('勤務表・手当ともに申請済みのため、編集できません。'); return }
+    const dateStr = formatDate(selectedDate)
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+
+    if (!isSchedLocked) {
+        const scheduleData: any = { user_id: user.id, user_email: user.email, date: dateStr, work_pattern_code: selectedPattern, leave_annual: details['leave_annual'] || null };
+        LEAVE_ITEMS_TIME.forEach(item => { scheduleData[item.key] = details[item.key] || null })
+        const { error: sErr } = await supabase.from('daily_schedules').upsert(scheduleData, { onConflict: 'user_id, date' })
+        if (sErr) { alert('勤務表保存エラー: ' + sErr.message); return }
+    }
+    if (!isAllowLocked) {
+        if (activityId) {
+            await supabase.from('allowances').delete().eq('user_id', user.id).eq('date', dateStr)
+            await supabase.from('allowances').insert({ user_id: user.id, user_email: user.email, date: dateStr, activity_type: ACTIVITY_TYPES.find(a => a.id === activityId)?.label || activityId, destination_type: DESTINATIONS.find(d => d.id === destinationId)?.label, destination_detail: destinationDetail, is_driving: isDriving, is_accommodation: isAccommodation, amount: calculatedAmount })
+        } else {
+            await supabase.from('allowances').delete().eq('user_id', user.id).eq('date', dateStr)
+        }
+    }
+    fetchData(user.id); setIsRegistered(true); setOpenCategory(null)
+    if (isSchedLocked) alert('手当のみ保存しました (勤務表は申請済)')
+    else if (isAllowLocked) alert('勤務表のみ保存しました (手当は申請済)')
+    else alert('保存しました')
+  }
+
+  const handleBulkRegister = async () => {
+    if (getLockStatus(new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1)).schedule) { alert('勤務表が申請済みのため、一括登録はできません。'); return }
+    if (!confirm(`${selectedDate.getMonth()+1}月の未入力日を、すべて「デフォルト勤務」として一括登録しますか？`)) return
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+    const year = selectedDate.getFullYear(), month = selectedDate.getMonth(), lastDay = new Date(year, month + 1, 0).getDate()
+    const updates = []
+    for (let d = 1; d <= lastDay; d++) {
+        const dateStr = formatDate(new Date(year, month, d))
+        const master = masterSchedules.find(m => m.date === dateStr)
+        const pattern = master?.work_pattern_code || 'C'
+        updates.push({ user_id: user.id, user_email: user.email, date: dateStr, work_pattern_code: pattern }) 
+    }
+    const { error } = await supabase.from('daily_schedules').upsert(updates, { onConflict: 'user_id, date', ignoreDuplicates: true })
+    if (error) alert('エラー: ' + error.message); else { alert('完了しました！'); fetchData(user.id); router.refresh() }
+  }
+
+  const handleDelete = async (id: number, dateStr: string) => { 
+    if (getLockStatus(new Date(dateStr)).allowance) { alert('手当が申請済みのため削除できません'); return }
+    if (!window.confirm('削除しますか？')) return; 
+    const { error } = await supabase.from('allowances').delete().eq('id', id)
+    if (!error) fetchData(userId)
+  }
+  
+  const handleSubmit = async (type: 'allowance' | 'schedule') => {
+    const label = type === 'allowance' ? '手当' : '勤務表'
+    if (!confirm(`${selectedDate.getMonth()+1}月分の【${label}】を確定して申請しますか？\n※申請すると、承認されるまで${label}項目の修正ができなくなります。`)) return
+    const ym = `${selectedDate.getFullYear()}-${String(selectedDate.getMonth() + 1).padStart(2, '0')}`
+    const { error } = await supabase.from('monthly_applications').upsert({ user_id: userId, year_month: ym, application_type: type, status: 'submitted', submitted_at: new Date().toISOString() })
+    if (error) alert('申請エラー: ' + error.message)
+    else { alert(`${label}を申請しました！`); if (type === 'allowance') setAllowanceStatus('submitted'); else setScheduleStatus('submitted') }
+  }
+
+  const handleLogout = async () => { await supabase.auth.signOut(); router.push('/login') }
+  const handlePrevMonth = () => { const d = new Date(selectedDate); d.setMonth(d.getMonth() - 1); setSelectedDate(d) }
+  const handleNextMonth = () => { const d = new Date(selectedDate); d.setMonth(d.getMonth() + 1); setSelectedDate(d) }
+  const calculateMonthTotal = () => { const m = selectedDate.getMonth(), y = selectedDate.getFullYear(); return allowances.filter(i => { const d = new Date(i.date); return d.getMonth() === m && d.getFullYear() === y }).reduce((s, i) => s + i.amount, 0) }
+
+  // ★カレンダー表示ロジック (優先順位: 申請データ > マスタ等)
+  const getTileContent = ({ date, view }: { date: Date; view: string }) => {
+    if (view !== 'month') return null
+    const dateStr = formatDate(date)
+    const schedule = schedules.find(s => s.date === dateStr)
+    const master = masterSchedules.find(m => m.date === dateStr)
+    const calData = schoolCalendar.find(c => c.date === dateStr)
+    const allowance = allowances.find(i => i.date === dateStr)
+    const leave = leaveApps.find(l => l.date === dateStr)
+
+    let label = ''; let labelColor = 'text-black'
+    
+    // 優先度1: 休暇申請 (pending=黄色, approved=緑, rejected=灰色)
+    if (leave) {
+        // 表示文字短縮
+        const shortName = leave.leave_type.replace('年次有給休暇', '年休').replace('休暇', '')
+        if (leave.status === 'pending') {
+            label = `${shortName}(仮)`; labelColor = 'text-yellow-600 font-bold'
+        } else if (leave.status === 'approved') {
+            label = shortName; labelColor = 'text-green-600 font-bold'
+        } else if (leave.status === 'rejected') {
+            label = `${shortName}(否)`; labelColor = 'text-gray-400'
+        }
+    } 
+    // 優先度2: 勤務パターン
+    else if (schedule?.work_pattern_code) { 
+        label = schedule.work_pattern_code
+        if (label.includes('休')) labelColor = 'text-red-600' 
+    } 
+    // 優先度3: マスタ
+    else if (master?.work_pattern_code) { 
+        label = master.work_pattern_code 
+    } 
+    // 優先度4: 休日カレンダー
+    else { 
+        if (calData?.day_type?.includes('休')) { label = '休'; labelColor = 'text-red-600' } 
+    }
+
+    return ( <div className="flex flex-col items-center justify-start h-8">{label && <span className={`text-[10px] leading-none ${labelColor}`}>{label}</span>}{allowance && <span className="text-[9px] font-bold text-black leading-tight -mt-0.5">¥{allowance.amount.toLocaleString()}</span>}</div> )
+  }
+  
+  const currentPatternDetail = workPatterns.find(p => p.code === selectedPattern)
+  const hasLeave = details['leave_annual'] || LEAVE_ITEMS_TIME.some(i => details[i.key])
+  
   return (
-    <div className="min-h-screen bg-slate-100 text-slate-900">
-      <div className="bg-slate-800 text-white p-4 shadow-md sticky top-0 z-20 flex justify-between items-center">
-        <h1 className="font-bold text-lg">事務担当者用ダッシュボード</h1>
-        <div className="flex gap-4 items-center">
-            {/* ★ここ: 休暇管理へのリンク */}
-            <button onClick={() => router.push('/admin/leaves')} className="text-xs bg-orange-600 px-4 py-2 rounded hover:bg-orange-700 font-bold border border-orange-400">
-                📄 休暇届の管理画面へ
-            </button>
-            <button onClick={() => router.push('/')} className="text-xs bg-slate-600 px-4 py-2 rounded hover:bg-slate-500 font-bold">アプリに戻る</button>
+    <div className="min-h-screen bg-slate-50 pb-20">
+       {isAdmin && <div className="bg-slate-800 text-white text-center py-3 text-sm font-bold shadow-md"><a href="/admin" className="underline hover:text-blue-300 transition">事務担当者ページへ</a></div>}
+
+      <div className="bg-white px-6 py-4 rounded-b-3xl shadow-sm mb-6 sticky top-0 z-10">
+        <div className="absolute right-4 top-4 flex gap-2">
+            <button onClick={() => setShowProfileModal(true)} className="text-xs font-bold text-slate-500 bg-slate-100 px-3 py-2 rounded-full border border-slate-200">{userName ? `👤 ${userName}` : '⚙️ 氏名登録'}</button>
+            <button onClick={handleLogout} className="text-xs font-bold text-slate-400 bg-slate-100 px-3 py-2 rounded-full border border-slate-200">ログアウト</button>
+        </div>
+
+        <div className="flex flex-col items-center mt-6">
+          <div className="flex items-center gap-4 mb-2">
+            <button onClick={handlePrevMonth} className="text-slate-400 p-2 text-xl font-bold">‹</button>
+            <h2 className="text-sm text-slate-500 font-bold">{selectedDate.getFullYear()}年 {selectedDate.getMonth() + 1}月</h2>
+            <button onClick={handleNextMonth} className="text-slate-400 p-2 text-xl font-bold">›</button>
+          </div>
+          <h1 className="text-4xl font-extrabold text-slate-800">¥{calculateMonthTotal().toLocaleString()}</h1>
+          
+          <div className="mt-3 flex flex-col gap-2 items-center w-full">
+              <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-slate-500 w-12 text-right">手当:</span>
+                  {allowanceStatus === 'approved' && <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-bold">🈴 承認済</span>}
+                  {allowanceStatus === 'submitted' && <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded text-xs font-bold">⏳ 申請中</span>}
+                  {allowanceStatus === 'draft' && !isAllowLocked && <button onClick={() => handleSubmit('allowance')} className="text-xs font-bold text-white bg-blue-600 px-3 py-1 rounded-full hover:bg-blue-700 shadow-sm">💰 申請</button>}
+                  {allowanceStatus === 'draft' && isAllowLocked && <span className="text-xs text-slate-400">締切済(ロック)</span>}
+              </div>
+              <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-slate-500 w-12 text-right">勤務表:</span>
+                  {scheduleStatus === 'approved' && <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-bold">🈴 承認済</span>}
+                  {scheduleStatus === 'submitted' && <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded text-xs font-bold">⏳ 申請中</span>}
+                  {scheduleStatus === 'draft' && !isSchedLocked && <button onClick={() => handleSubmit('schedule')} className="text-xs font-bold text-white bg-green-600 px-3 py-1 rounded-full hover:bg-green-700 shadow-sm">⏰ 申請</button>}
+                  {scheduleStatus === 'draft' && isSchedLocked && <span className="text-xs text-slate-400">締切済(ロック)</span>}
+              </div>
+              {!isSchedLocked && <button onClick={handleBulkRegister} className="mt-1 text-xs text-slate-400 underline">一括登録はこちら</button>}
+          </div>
         </div>
       </div>
 
-      <div className="max-w-[95%] mx-auto p-6 space-y-8">
-        {/* メイン操作エリア (以前と同じ) */}
-        <div className="flex flex-col md:flex-row justify-between items-center gap-4 bg-white p-4 rounded-xl shadow border border-slate-200">
-          <div className="flex items-center gap-4">
-            <button onClick={() => handleMonthChange(-1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold">‹</button>
-            <span className="text-2xl font-extrabold text-slate-800 w-40 text-center">{selectedMonth.getFullYear()}年 {selectedMonth.getMonth() + 1}月</span>
-            <button onClick={() => handleMonthChange(1)} className="p-2 hover:bg-slate-100 rounded text-xl font-bold">›</button>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-bold text-slate-600">表示対象:</span>
-            <select className="p-2 border border-slate-300 rounded font-bold text-sm" value={selectedUserId} onChange={(e) => setSelectedUserId(e.target.value)}>
-                <option value="all">全員を表示</option>
-                {userList.map(u => (<option key={u.id} value={u.id}>{userProfiles[u.email] ? `${userProfiles[u.email]} (${u.email})` : u.email}</option>))}
-            </select>
-          </div>
-          <div className="flex gap-2">
-             <button onClick={() => setViewMode('allowance')} className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${viewMode === 'allowance' ? 'bg-blue-600 text-white shadow' : 'bg-slate-100 text-slate-500'}`}>💰 表示:手当</button>
-             <button onClick={() => setViewMode('schedule')} className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${viewMode === 'schedule' ? 'bg-green-600 text-white shadow' : 'bg-slate-100 text-slate-500'}`}>⏰ 表示:勤務</button>
-          </div>
+      <div className="px-4 max-w-md mx-auto space-y-6">
+        <div className="bg-white p-4 rounded-3xl shadow-sm">
+          <Calendar onChange={(val) => setSelectedDate(val as Date)} value={selectedDate} activeStartDate={selectedDate} onActiveStartDateChange={({ activeStartDate }) => activeStartDate && setSelectedDate(activeStartDate)} locale="ja-JP" tileContent={getTileContent} className="w-full border-none" />
         </div>
 
-        {/* 出力ボタンエリア */}
-        <div className="bg-white p-4 rounded-xl shadow border border-slate-200 flex flex-wrap gap-4 items-center justify-end">
-            <span className="text-sm font-bold text-slate-500 mr-auto">帳票出力メニュー:</span>
-            <button onClick={downloadAllowanceExcel} className="bg-blue-600 text-white px-5 py-2 rounded-lg text-sm font-bold hover:bg-blue-700 shadow flex items-center gap-2">💰 手当帳票 (.xlsx)</button>
-            <div className="h-8 w-px bg-slate-300 mx-2"></div>
-            <button onClick={downloadMonthlyScheduleExcel} className="bg-green-600 text-white px-5 py-2 rounded-lg text-sm font-bold hover:bg-green-700 shadow flex items-center gap-2">📅 月間 勤務表 (.xlsx)</button>
-            <button onClick={downloadAnnualScheduleExcel} disabled={downloading} className="bg-green-800 text-white px-5 py-2 rounded-lg text-sm font-bold hover:bg-green-900 shadow flex items-center gap-2">{downloading ? '⏳ 出力中...' : '📅 年間 勤務表 (4月-3月)'}</button>
+        <div className={`p-6 rounded-3xl shadow-sm border ${isSchedLocked && isAllowLocked ? 'bg-slate-100 border-slate-300' : isRegistered ? 'bg-green-50 border-green-200' : 'bg-white border-slate-200'}`}>
+          <div className="flex justify-between items-center mb-4 border-b pb-2">
+            <h2 className="font-bold text-slate-700 text-sm">{selectedDate.getMonth() + 1}/{selectedDate.getDate()} の勤務・手当</h2>
+            <div className="flex gap-2">
+                {isSchedLocked && <span className="text-xs px-2 py-1 rounded font-bold bg-gray-100 text-gray-500">⏰ ロック</span>}
+                {isAllowLocked && <span className="text-xs px-2 py-1 rounded font-bold bg-gray-100 text-gray-500">💰 ロック</span>}
+                <span className={`text-xs px-2 py-1 rounded font-bold ${isRegistered ? 'bg-green-200 text-green-800' : 'bg-slate-200 text-slate-500'}`}>{isRegistered ? '登録済' : '未登録'}</span>
+            </div>
+          </div>
+
+          <form onSubmit={handleSave} className={`flex flex-col gap-4 ${isSchedLocked && isAllowLocked ? 'opacity-60 pointer-events-none' : ''}`}>
+            
+            <div className={`bg-white p-3 rounded-xl border ${isSchedLocked ? 'border-gray-200 opacity-60 pointer-events-none bg-gray-50' : 'border-slate-200'}`}>
+              <label className="block text-xs font-bold text-black mb-1">勤務パターン {isSchedLocked && '(編集不可)'}</label>
+              <div className="flex items-center gap-2">
+                <select disabled={isSchedLocked} value={selectedPattern} onChange={(e) => setSelectedPattern(e.target.value)} className="flex-1 bg-white p-2 rounded border border-slate-300 font-bold text-black">
+                  <option value="">(未設定)</option>
+                  {workPatterns.map(p => <option key={p.id} value={p.code}>{p.code} ({p.start_time.slice(0,5)}-{p.end_time.slice(0,5)})</option>)}
+                </select>
+                <div className="text-xs text-black font-bold w-1/3 text-right">{currentPatternDetail?.description}</div>
+              </div>
+            </div>
+
+            {/* ★ここから: 休暇申請エリア（UI改善） */}
+            <div className={`bg-white rounded-xl border transition-all ${openCategory === 'application' ? 'border-orange-400 ring-2 ring-orange-100' : currentLeaveApp ? 'border-orange-300 bg-orange-50' : 'border-slate-200'}`}>
+              <button disabled={isSchedLocked} type="button" onClick={() => setOpenCategory(openCategory === 'application' ? null : 'application')} className="w-full flex justify-between items-center p-3 text-left">
+                 <div className="flex items-center gap-2">
+                     <span className="text-lg">📄</span>
+                     <span className={`text-xs font-bold ${currentLeaveApp ? 'text-orange-600' : 'text-black'}`}>休暇・欠勤届 {currentLeaveApp && '(申請有)'}</span>
+                 </div>
+                <span className="text-slate-400 text-xs">{openCategory === 'application' ? '▲ 閉じる' : '申請する +'}</span>
+              </button>
+              {(openCategory === 'application' || currentLeaveApp) && (
+                <div className="p-3 pt-0 border-t border-slate-100 bg-orange-50/30 rounded-b-xl space-y-3">
+                   {currentLeaveApp && <div className="text-xs text-orange-600 font-bold bg-white p-2 rounded border border-orange-200 mb-2">ステータス: {currentLeaveApp.status === 'pending' ? '⏳ 申請中 (管理職承認待ち)' : currentLeaveApp.status === 'approved' ? '🈴 承認済み' : '却下'}</div>}
+                   
+                   {!isSchedLocked ? (
+                       <div className="space-y-2">
+                           <div>
+                               <label className="block text-xs font-bold text-slate-500 mb-1">種類</label>
+                               <select value={leaveType} onChange={(e) => setLeaveType(e.target.value)} className="w-full p-2 text-sm border rounded bg-white font-bold">{LEAVE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}</select>
+                           </div>
+                           <div>
+                               <label className="block text-xs font-bold text-slate-500 mb-1">期間</label>
+                               <select value={leaveDuration} onChange={(e) => setLeaveDuration(e.target.value)} className="w-full p-2 text-sm border rounded bg-white font-bold">{LEAVE_DURATIONS.map(d => <option key={d} value={d}>{d}</option>)}</select>
+                           </div>
+                           <div>
+                               <label className="block text-xs font-bold text-slate-500 mb-1">事由</label>
+                               <input type="text" value={leaveReason} onChange={(e) => setLeaveReason(e.target.value)} placeholder="例: 私用のため" className="w-full p-2 text-sm border rounded bg-white" />
+                           </div>
+                           <div className="flex gap-2 pt-2">
+                               {/* ★修正: ボタンの文言を状況に合わせて変更 */}
+                               <button type="button" onClick={handleLeaveApply} className="flex-1 bg-orange-500 text-white font-bold py-2 rounded shadow text-xs">
+                                   {currentLeaveApp ? '内容を修正して再申請' : '届出を送信'}
+                               </button>
+                               {currentLeaveApp && <button type="button" onClick={handleLeaveCancel} className="bg-slate-200 text-slate-500 font-bold py-2 px-4 rounded shadow text-xs">取下</button>}
+                           </div>
+                       </div>
+                   ) : (
+                       <div className="text-xs text-slate-400">※ロック中のため編集できません</div>
+                   )}
+                </div>
+              )}
+            </div>
+            {/* ★ここまで */}
+
+            <div className={`bg-white rounded-xl border transition-all ${isSchedLocked ? 'border-gray-200 opacity-60 pointer-events-none bg-gray-50' : openCategory === 'leave' ? 'border-green-400 ring-2 ring-green-100' : hasLeave ? 'border-green-300' : 'border-slate-200'}`}>
+              <button disabled={isSchedLocked} type="button" onClick={() => setOpenCategory(openCategory === 'leave' ? null : 'leave')} className="w-full flex justify-between items-center p-3 text-left">
+                 <div className="flex items-center gap-2"><span className="text-lg">⏱</span><span className={`text-xs font-bold ${hasLeave ? 'text-green-600' : 'text-black'}`}>時間休・その他 {isSchedLocked && '(編集不可)'}</span></div>
+                <span className="text-slate-400 text-xs">{openCategory === 'leave' ? '▲ 閉じる' : hasLeave ? '詳細あり ▼' : '追加する +'}</span>
+              </button>
+              {(openCategory === 'leave' || hasLeave) && (
+                <div className="p-3 pt-0 border-t border-slate-100 bg-green-50/30 rounded-b-xl space-y-3">
+                   {openCategory === 'leave' && (<div className="mb-2"><div className="flex flex-wrap gap-2">{LEAVE_ITEMS_TIME.map(item => (<button key={item.key} type="button" onClick={() => updateDetail(item.key, details[item.key] ? '' : '00:00')} className={`text-xs px-2 py-1 rounded border font-bold ${details[item.key] ? 'bg-green-500 text-white border-green-600' : 'bg-white text-black border-slate-300'}`}>{item.label}</button>))}</div></div>)}
+                   {LEAVE_ITEMS_TIME.filter(i => details[i.key] !== undefined).map(item => (<div key={item.key} className="flex items-center gap-2 animate-fadeIn"><label className="text-xs font-bold text-black w-24 truncate">{item.label}</label><input type="text" placeholder="時間" value={details[item.key] || ''} onChange={(e) => updateDetail(item.key, e.target.value)} className="flex-1 p-2 rounded border border-slate-300 text-sm text-black font-bold" /><button type="button" onClick={() => updateDetail(item.key, '')} className="text-slate-400 hover:text-red-500">×</button></div>))}
+                </div>
+              )}
+            </div>
+
+            <hr className="border-slate-100" />
+            
+            <div className={`${isAllowLocked ? 'opacity-60 pointer-events-none grayscale' : ''}`}>
+                <div><label className="block text-xs font-bold text-black mb-1">部活動 業務内容 {isAllowLocked && '(編集不可)'}</label><select disabled={isAllowLocked} value={activityId} onChange={(e) => setActivityId(e.target.value)} className="w-full bg-slate-50 p-3 rounded-lg border border-slate-200 font-bold text-black text-sm"><option value="">なし (部活なし)</option>{ACTIVITY_TYPES.map(type => <option key={type.id} value={type.id}>{type.label}</option>)}</select></div>
+                {activityId && (<><div className="grid grid-cols-2 gap-2 mt-2"><div><label className="block text-xs font-bold text-black mb-1">区分</label><select disabled={isAllowLocked} value={destinationId} onChange={(e) => setDestinationId(e.target.value)} className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-black font-bold">{DESTINATIONS.map(d => <option key={d.id} value={d.id}>{d.label}</option>)}</select></div><div><label className="block text-xs font-bold text-black mb-1">詳細</label><input disabled={isAllowLocked} type="text" placeholder="例: 県体育館" value={destinationDetail} onChange={(e) => setDestinationDetail(e.target.value)} className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-black font-bold" /></div></div><div className="flex gap-3 mt-2"><label className={`flex-1 p-3 rounded-lg cursor-pointer border text-center text-xs font-bold ${isDriving ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-400'}`}><input disabled={isAllowLocked} type="checkbox" checked={isDriving} onChange={e => setIsDriving(e.target.checked)} className="hidden" />🚗 運転あり</label><label className={`flex-1 p-3 rounded-lg cursor-pointer border text-center text-xs font-bold ${isAccommodation ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-400'}`}><input disabled={isAllowLocked} type="checkbox" checked={isAccommodation} onChange={e => setIsAccommodation(e.target.checked)} className="hidden" />🏨 宿泊あり</label></div><div className="bg-slate-800 text-white p-4 rounded-xl flex justify-between items-center mt-2"><span className="text-xs font-medium">支給予定額</span><span className="text-xl font-bold">¥{calculatedAmount.toLocaleString()}</span></div></>)}
+            </div>
+
+            {(!isSchedLocked || !isAllowLocked) && <button type="submit" className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 shadow-md">この内容で保存する</button>}
+          </form>
         </div>
 
-        {/* データテーブル */}
-        {loading ? <div className="text-center py-20 text-slate-500 font-bold animate-pulse">データを集計中...</div> : (
-          <div className="bg-white rounded-xl shadow overflow-hidden border border-slate-200">
-            {viewMode === 'allowance' && (
-                <div className="overflow-x-auto">
-                    <table className="w-full text-left text-sm">
-                    <thead className="bg-slate-800 text-white">
-                        <tr><th className="p-4 font-bold w-1/4">氏名 (手当ステータス)</th><th className="p-4 font-bold text-right w-1/6">支給合計額</th><th className="p-4 font-bold">内訳</th><th className="p-4 font-bold w-32 text-center">承認操作</th></tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-200">
-                        {aggregatedData.map((user, i) => (
-                        <tr key={i} className="hover:bg-slate-50">
-                            <td className="p-4 font-bold align-top">
-                                <div>{user.name}</div>
-                                {user.allowStatus === 'submitted' && <span className="inline-block bg-yellow-100 text-yellow-700 text-[10px] px-2 py-0.5 rounded border border-yellow-300 mt-1">⏳ 申請中</span>}
-                                {user.allowStatus === 'approved' && <div className="mt-1"><span className="inline-block bg-green-100 text-green-700 text-[10px] px-2 py-0.5 rounded border border-green-300">🈴 承認済</span><div className="text-[10px] text-slate-400 mt-1">{fmtDate(user.allowApprovedAt)}</div></div>}
-                            </td>
-                            <td className="p-4 text-right font-extrabold text-blue-700 align-top text-lg">¥{user.total_amount.toLocaleString()}</td>
-                            <td className="p-4">
-                                <div className="flex flex-wrap gap-2">
-                                    {user.allowance_details.map((d: any) => (<div key={d.id} className="bg-white border border-slate-200 px-3 py-2 rounded-lg shadow-sm flex items-center gap-3"><span className="font-bold text-slate-700">{d.date.slice(8)}日</span><span className="text-slate-600 text-xs">{d.activity_type}</span><span className="font-bold text-blue-600">¥{d.amount.toLocaleString()}</span><button onClick={() => handleDeleteAllowance(d.id)} className="text-slate-300 hover:text-red-500 text-lg leading-none">×</button></div>))}
-                                </div>
-                            </td>
-                            <td className="p-4 text-center">
-                                {user.allowStatus === 'submitted' && <button onClick={() => updateStatus(user.id, 'allowance', 'approved')} className="bg-blue-600 text-white px-3 py-1 rounded text-xs font-bold shadow hover:bg-blue-700 w-full mb-2">手当承認</button>}
-                                {(user.allowStatus === 'submitted' || user.allowStatus === 'approved') && <button onClick={() => updateStatus(user.id, 'allowance', 'draft')} className="bg-slate-200 text-slate-600 px-3 py-1 rounded text-xs font-bold hover:bg-slate-300 w-full">差し戻し</button>}
-                            </td>
-                        </tr>
-                        ))}
-                    </tbody>
-                    </table>
-                </div>
-            )}
-            {viewMode === 'schedule' && (
-                <div className="overflow-x-auto">
-                    <table className="w-full text-left text-sm whitespace-nowrap">
-                    <thead className="bg-slate-800 text-white">
-                        <tr>
-                        <th className="p-4 font-bold sticky left-0 bg-slate-800 z-10 border-r border-slate-600 w-48"><div className="flex justify-between items-center"><span>氏名 (勤務ステータス)</span><span className="text-[10px] font-normal opacity-70">承認操作</span></div></th>
-                        <th className="p-4 font-bold text-center bg-orange-900 border-l border-slate-600" colSpan={3}>年休管理</th>
-                        <th className="p-4 font-bold border-l border-slate-600">勤務形態</th>
-                        {TIME_ITEMS.map(item => <th key={item.key} className="p-4 font-bold text-center border-l border-slate-600 min-w-[80px]">{item.label}</th>)}
-                        </tr>
-                        <tr className="bg-orange-800 text-xs text-orange-100"><th className="sticky left-0 bg-slate-800 z-10 border-r border-slate-600"></th><th className="p-1 text-center border-l border-orange-700">使用</th><th className="p-1 text-center border-l border-orange-700">残</th><th className="p-1 text-center border-l border-orange-700">時休計</th><th className="border-l border-slate-600"></th>{TIME_ITEMS.map(i => <th key={i.key} className="border-l border-slate-600"></th>)}</tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-200">
-                        {aggregatedData.map((user, i) => (
-                        <tr key={i} className="hover:bg-yellow-50 transition-colors text-slate-900">
-                            <td className="p-4 font-bold sticky left-0 bg-white border-r border-slate-200 z-10 align-top">
-                                <div className="mb-2">{user.name}</div>
-                                <div className="flex flex-col gap-1 mb-2">
-                                    {user.schedStatus === 'submitted' && <span className="inline-block bg-yellow-100 text-yellow-700 text-[10px] px-2 py-0.5 rounded border border-yellow-300 text-center">⏳ 申請中</span>}
-                                    {user.schedStatus === 'approved' && <><span className="inline-block bg-green-100 text-green-700 text-[10px] px-2 py-0.5 rounded border border-green-300 text-center">🈴 承認済</span><span className="text-[9px] text-slate-400 text-center">{fmtDate(user.schedApprovedAt)}</span></>}
-                                </div>
-                                {user.schedStatus === 'submitted' && <button onClick={() => updateStatus(user.id, 'schedule', 'approved')} className="bg-green-600 text-white px-3 py-1 rounded text-xs font-bold shadow hover:bg-green-700 w-full mb-1">勤務承認</button>}
-                                {(user.schedStatus === 'submitted' || user.schedStatus === 'approved') && <button onClick={() => updateStatus(user.id, 'schedule', 'draft')} className="bg-slate-200 text-slate-600 px-3 py-1 rounded text-xs font-bold hover:bg-slate-300 w-full">差し戻し</button>}
-                            </td>
-                            <td className="p-4 text-center font-bold text-orange-700 border-l border-slate-100 bg-orange-50/20">{user.annual_leave_used > 0 ? `-${user.annual_leave_used}` : '-'}</td>
-                            <td className="p-4 text-center border-l border-slate-100 bg-orange-50/20"><span className={`px-2 py-1 rounded font-bold ${user.annual_leave_remain < 5 ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-700'}`}>{user.annual_leave_remain}</span></td>
-                            <td className="p-4 text-center font-bold text-slate-600 border-l border-slate-100 bg-orange-50/20">{formatMinutes(user.time_totals['leave_hourly']) || '-'}</td>
-                            <td className="p-4 text-xs border-l border-slate-100"><div className="flex flex-wrap gap-1">{Object.entries(user.patterns).map(([code, count]) => <span key={code} className="px-1.5 py-0.5 rounded border bg-slate-100 border-slate-200"><b>{code as string}</b>:{count as number}</span>)}</div></td>
-                            {TIME_ITEMS.map(item => <td key={item.key} className={`p-4 text-center border-l border-slate-100 ${user.time_totals[item.key] > 0 ? 'font-bold bg-yellow-50' : 'text-slate-300'}`}>{formatMinutes(user.time_totals[item.key]) || '-'}</td>)}
-                        </tr>
-                        ))}
-                    </tbody>
-                    </table>
-                </div>
-            )}
-          </div>
-        )}
-
-        {/* CSV登録エリア (前回同様) */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200"><h3 className="font-bold text-slate-700 mb-4 flex items-center gap-2">📅 ① カレンダー予定登録</h3><p className="text-xs text-slate-500 mb-4">全員の予定を一括登録（日付, パターン）</p><input type="file" accept=".csv" onChange={(e) => setMasterFile(e.target.files?.[0] || null)} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" /><button onClick={() => processUpload('master')} disabled={!masterFile || uploading} className="mt-4 w-full bg-blue-600 text-white font-bold py-3 rounded-lg shadow-md hover:bg-blue-700 active:scale-95 active:bg-blue-800 transition-all disabled:opacity-50 disabled:active:scale-100">登録を実行する</button></div>
-            <div className="bg-white p-6 rounded-lg shadow-sm border border-slate-200"><h3 className="font-bold text-slate-700 mb-4 flex items-center gap-2">⏰ ② 勤務時間定義</h3><p className="text-xs text-slate-500 mb-4">A=8:15...を定義（コード, 開始, 終了）</p><input type="file" accept=".csv" onChange={(e) => setPatternFile(e.target.files?.[0] || null)} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" /><button onClick={() => processUpload('patterns')} disabled={!patternFile || uploading} className="mt-4 w-full bg-blue-600 text-white font-bold py-3 rounded-lg shadow-md hover:bg-blue-700 active:scale-95 active:bg-blue-800 transition-all disabled:opacity-50 disabled:active:scale-100">登録を実行する</button></div>
+        <div className="space-y-2 pb-10">
+            <h3 className="font-bold text-slate-400 text-xs px-2">{selectedDate.getMonth() + 1}月の手当履歴</h3>
+            {allowances.filter(i => { const d = new Date(i.date); return d.getMonth() === selectedDate.getMonth() && d.getFullYear() === selectedDate.getFullYear() }).map((item) => (
+            <div key={item.id} className="bg-white p-3 rounded-xl shadow-sm flex justify-between items-center border border-slate-100">
+                <div className="flex items-center gap-3"><span className="font-bold text-slate-700 text-sm">{item.date.split('-')[2]}日</span><span className="text-xs text-slate-500">{item.activity_type}</span></div>
+                <div className="flex items-center gap-2"><span className="font-bold text-slate-700 text-sm">¥{item.amount.toLocaleString()}</span>{!isAllowLocked && <button onClick={() => handleDelete(item.id, item.date)} className="text-slate-300 hover:text-red-500">🗑</button>}</div>
+            </div>
+            ))}
         </div>
       </div>
+
+      {showProfileModal && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white p-6 rounded-2xl shadow-xl w-full max-w-sm">
+                  <h3 className="text-lg font-bold text-slate-800 mb-4">氏名登録</h3>
+                  <p className="text-xs text-slate-500 mb-4">帳票出力に使用する氏名を登録してください。<br/>自動的に姓と名の間に半角スペースが入ります。</p>
+                  <div className="flex gap-2 mb-4"><div className="flex-1"><label className="text-xs font-bold text-slate-500">姓</label><input type="text" value={inputLastName} onChange={(e) => setInputLastName(e.target.value)} placeholder="例: 羽黒" className="w-full p-3 rounded border border-slate-300 mt-1 font-bold text-black" /></div><div className="flex-1"><label className="text-xs font-bold text-slate-500">名</label><input type="text" value={inputFirstName} onChange={(e) => setInputFirstName(e.target.value)} placeholder="例: 太郎" className="w-full p-3 rounded border border-slate-300 mt-1 font-bold text-black" /></div></div>
+                  <div className="flex gap-2"><button onClick={() => setShowProfileModal(false)} className="flex-1 py-3 rounded-xl bg-slate-100 text-slate-500 font-bold">キャンセル</button><button onClick={handleSaveProfile} className="flex-1 py-3 rounded-xl bg-blue-600 text-white font-bold shadow">登録する</button></div>
+              </div>
+          </div>
+      )}
     </div>
   )
 }
