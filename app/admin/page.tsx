@@ -52,7 +52,7 @@ export default function Home() {
   const [schoolCalendar, setSchoolCalendar] = useState<SchoolCalendar[]>([])
   const [masterSchedules, setMasterSchedules] = useState<MasterSchedule[]>([]) 
   const [workPatterns, setWorkPatterns] = useState<WorkPattern[]>([])
-  const [leaveApps, setLeaveApps] = useState<LeaveApplication[]>([]) // 休暇申請
+  const [leaveApps, setLeaveApps] = useState<LeaveApplication[]>([]) // 休暇申請データ
   
   const [allowanceStatus, setAllowanceStatus] = useState<'draft' | 'submitted' | 'approved'>('draft')
   const [scheduleStatus, setScheduleStatus] = useState<'draft' | 'submitted' | 'approved'>('draft')

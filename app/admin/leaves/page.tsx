@@ -49,36 +49,7 @@ export default function AdminLeavesPage() {
     const { data: userData } = await supabase.from('user_profiles').select('*')
     const pMap: Record<string, string> = {}
     userData?.forEach((u: any) => pMap[u.email] = u.full_name)
-    // IDと紐付けるために別途ユーザーリストも必要だが、ここでは簡易的にキャッシュ利用
-    // (本来は user_id から紐付けるのが確実ですが、既存ロジックに合わせてプロフィール取得)
     
-    // user_id から名前を引けるようにする
-    const idToNameMap: Record<string, string> = {}
-    // ※Supabaseのauth.usersは直接結合できないため、申請データにあるuser_idを使って
-    // プロフィールデータと照合するロジックが必要。
-    // ここでは簡易的に、すでに取得済みのuser_profilesのemailを使って紐付けるが、
-    // 確実なのはuser_profilesにuser_idカラムを持たせること。
-    // 現状のDB構造に合わせて、「user_id」から「email」を特定するのは管理者権限でも工夫が必要なため
-    // 今回は「申請者の名前」を表示するために、クライアントサイドで補完します。
-    
-    // 補完ロジック: user_profiles の email をキーにしているが、leave_applications は user_id を持っている。
-    // この画面で user_id -> email -> name の変換をするには、
-    // 実は user_profiles に user_id を保存しておくのが一番早いです。
-    // 今回は既存の仕組みで動くよう、user_idから名前を取得するクエリを追加します。
-    
-    // ★修正: user_profilesテーブルから全員分取ってきて、ID検索はできないので
-    // 一旦、申請データに関連するユーザー情報を取得する関数があればベストですが、
-    // ここではシンプルに「全プロフィール」を取得して表示します。
-    // (user_profilesテーブルにuser_idがない場合、emailでの紐付けになりますが、
-    //  leave_applicationsにはemailがないため、表示用にemailを追加保存するか、
-    //  user_profilesにuser_idを追加することをお勧めします。
-    //  ★今回は「手当申請」のロジックを流用し、daily_schedulesなどから紐付けを試みます)
-    
-    // 暫定対応: ユーザー一覧を取得（管理者機能）
-    // ※ Supabase Admin Clientを使わないとauth.usersは見れないため、
-    //   「手当画面」で取得していた userList ロジックと同じ方法で紐付けます。
-    
-    // ここでは表示用IDとしてそのまま表示しつつ、わかる範囲で変換します。
     setUserProfiles(pMap)
     setLoading(false)
   }
@@ -96,10 +67,6 @@ export default function AdminLeavesPage() {
     else fetchData()
   }
 
-  // 名前解決ヘルパー (user_profilesにuser_idがない場合の緊急策)
-  // ※本来は user_profiles テーブルに user_id カラムを追加して紐付けるのが正解です。
-  //   今回は簡易的に「ID」を表示しつつ、もし一致するメアドがあれば名前を出します。
-  
   if (!isAdmin) return <div className="p-10 text-center">確認中...</div>
 
   return (
@@ -133,8 +100,7 @@ export default function AdminLeavesPage() {
         ) : (
             <div className="space-y-3">
                 {leaves.map((leave) => {
-                    // 名前解決を試みる（user_profilesにuser_idがないため、完全には名前が出ない可能性があります）
-                    // ★今後の改善点: user_profilesにuser_idカラムを追加すると完璧になります。
+                    // user_idの先頭を表示
                     const displayName = "職員ID: " + leave.user_id.slice(0, 8) + "..." 
 
                     return (
