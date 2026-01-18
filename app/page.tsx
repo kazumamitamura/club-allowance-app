@@ -5,9 +5,13 @@ import { createClient } from '@/utils/supabase/client'
 import { useRouter } from 'next/navigation'
 import Calendar from 'react-calendar'
 import 'react-calendar/dist/Calendar.css'
-import { ACTIVITY_TYPES, DESTINATIONS, calculateAmount } from '@/utils/allowanceRules'
+import { ACTIVITY_TYPES, DESTINATIONS, calculateAmount, canSelectActivity } from '@/utils/allowanceRules'
+import { durationToHours, hoursToDisplayFormat, calculateLeaveBalance, daysToHours } from '@/utils/leaveCalculations'
 
 const ADMIN_EMAILS = ['mitamuraka@haguroko.ed.jp', 'tomonoem@haguroko.ed.jp'].map(e => e.toLowerCase())
+
+const LEAVE_TYPES = ['年次有給休暇', '夏季休暇', '慶弔休暇', '病気休暇', '産前産後休暇', '育児休暇', '介護休暇', '職免']
+const LEAVE_DURATIONS = ['1日', '半日(午前)', '半日(午後)', '時間休']
 
 const LEAVE_ITEMS_TIME = [
   { key: 'leave_hourly', label: '時間年休' },
@@ -26,6 +30,7 @@ type WorkPattern = { id: number, code: string, start_time: string, end_time: str
 type DailySchedule = { id: number, user_id: string, date: string, work_pattern_code: string | null, [key: string]: any }
 type SchoolCalendar = { date: string, day_type: string }
 type MasterSchedule = { date: string, work_pattern_code: string }
+type LeaveApplication = { id: number, user_id: string, date: string, leave_type: string, duration: string, reason: string, status: string }
 
 const formatDate = (date: Date) => {
   const y = date.getFullYear()
@@ -48,6 +53,8 @@ export default function Home() {
   const [schoolCalendar, setSchoolCalendar] = useState<SchoolCalendar[]>([])
   const [masterSchedules, setMasterSchedules] = useState<MasterSchedule[]>([]) 
   const [workPatterns, setWorkPatterns] = useState<WorkPattern[]>([])
+  const [leaveApps, setLeaveApps] = useState<LeaveApplication[]>([])
+  const [leaveBalance, setLeaveBalance] = useState<any>(null)
   
   const [allowanceStatus, setAllowanceStatus] = useState<'draft' | 'submitted' | 'approved'>('draft')
   const [scheduleStatus, setScheduleStatus] = useState<'draft' | 'submitted' | 'approved'>('draft')
@@ -58,12 +65,18 @@ export default function Home() {
   const [selectedPattern, setSelectedPattern] = useState('C')
   const [details, setDetails] = useState<any>({})
   
-  const [openCategory, setOpenCategory] = useState<'leave' | null>(null)
+  const [openCategory, setOpenCategory] = useState<'leave' | 'application' | null>(null)
 
   // 氏名登録モーダル用
   const [showProfileModal, setShowProfileModal] = useState(false)
   const [inputLastName, setInputLastName] = useState('')
   const [inputFirstName, setInputFirstName] = useState('')
+
+  // 休暇申請入力用
+  const [leaveType, setLeaveType] = useState('年次有給休暇')
+  const [leaveDuration, setLeaveDuration] = useState('1日')
+  const [leaveReason, setLeaveReason] = useState('')
+  const [currentLeaveApp, setCurrentLeaveApp] = useState<LeaveApplication | null>(null)
 
   const [activityId, setActivityId] = useState('')
   const [destinationId, setDestinationId] = useState('school')
@@ -103,6 +116,7 @@ export default function Home() {
       fetchSchoolCalendar()
       fetchMasterSchedules()
       fetchApplicationStatus(user.id, selectedDate)
+      fetchLeaveBalance(user.id)
       const { data } = await supabase.from('work_patterns').select('*').order('code')
       if (data) setWorkPatterns(data)
     }
@@ -150,6 +164,28 @@ export default function Home() {
     setAllowances(allowData || [])
     const { data: schedData } = await supabase.from('daily_schedules').select('*').eq('user_id', uid)
     setSchedules(schedData || [])
+    // 休暇申請データ取得
+    const { data: leaveData } = await supabase.from('leave_applications').select('*').eq('user_id', uid)
+    setLeaveApps(leaveData || [])
+  }
+
+  const fetchLeaveBalance = async (uid: string) => {
+    const { data } = await supabase
+      .from('leave_balances')
+      .select('*')
+      .eq('user_id', uid)
+      .single()
+    
+    if (data) {
+      setLeaveBalance(data)
+    } else {
+      // デフォルト値（年休20日 = 160時間）
+      setLeaveBalance({
+        user_id: uid,
+        annual_leave_total: daysToHours(20),
+        annual_leave_used: 0
+      })
+    }
   }
 
   const fetchSchoolCalendar = async () => {
@@ -174,9 +210,11 @@ export default function Home() {
       const calData = schoolCalendar.find(c => c.date === dateStr)
       const type = calData?.day_type || (selectedDate.getDay() % 6 === 0 ? '休日(仮)' : '勤務日(仮)')
       setDayType(type)
+      
       const masterSchedule = masterSchedules.find(m => m.date === dateStr)
       const defaultPattern = masterSchedule?.work_pattern_code || (type.includes('休日') || type.includes('週休') ? '' : 'C')
       const scheduleData = schedules.find(s => s.date === dateStr)
+      
       if (scheduleData) {
         setIsRegistered(true)
         setSelectedPattern(scheduleData.work_pattern_code || defaultPattern)
@@ -187,6 +225,20 @@ export default function Home() {
       } else {
         setIsRegistered(false); setSelectedPattern(defaultPattern); setDetails({})
       }
+
+      // 休暇申請データの反映
+      const leaveApp = leaveApps.find(l => l.date === dateStr)
+      setCurrentLeaveApp(leaveApp || null)
+      if (leaveApp) {
+          setLeaveType(leaveApp.leave_type)
+          setLeaveDuration(leaveApp.duration)
+          setLeaveReason(leaveApp.reason || '')
+      } else {
+          setLeaveType('年次有給休暇')
+          setLeaveDuration('1日')
+          setLeaveReason('')
+      }
+
       const allowance = allowances.find(a => a.date === dateStr)
       if (allowance) {
         setActivityId(allowance.activity_type === allowance.activity_type ? (ACTIVITY_TYPES.find(t => t.label === allowance.activity_type)?.id || allowance.activity_type) : '')
@@ -198,17 +250,66 @@ export default function Home() {
       }
     }
     updateDayInfo()
-  }, [selectedDate, allowances, schedules, schoolCalendar, masterSchedules])
+  }, [selectedDate, allowances, schedules, schoolCalendar, masterSchedules, leaveApps])
 
   useEffect(() => {
     const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
     if (!activityId) { setCalculatedAmount(0); return }
+    
+    // 勤務日判定
+    const validation = canSelectActivity(activityId, isWorkDay)
+    if (!validation.allowed) {
+      // 警告を表示（選択は可能だが警告）
+      console.warn(validation.message)
+    }
+    
     const amt = calculateAmount(activityId, isDriving, destinationId, isWorkDay)
     setCalculatedAmount(amt)
   }, [activityId, isDriving, destinationId, dayType])
 
   const updateDetail = (key: string, value: string) => {
     setDetails((prev: any) => { const next = { ...prev }; if (value === '') delete next[key]; else next[key] = value; return next })
+  }
+
+  // 休暇申請の送信（Upsert）
+  const handleLeaveApply = async () => {
+      const dateStr = formatDate(selectedDate)
+      
+      // 時間単位で計算
+      const hoursUsed = durationToHours(leaveDuration)
+      
+      const { error } = await supabase.from('leave_applications').upsert({
+          user_id: userId,
+          date: dateStr,
+          leave_type: leaveType,
+          duration: leaveDuration,
+          hours_used: hoursUsed,
+          reason: leaveReason,
+          status: 'pending'
+      }, { onConflict: 'user_id, date' })
+
+      if (error) alert('エラー: ' + error.message)
+      else {
+          alert(currentLeaveApp ? '申請内容を修正しました！' : '休暇届を申請しました！\n（管理者の承認待ち状態です）')
+          fetchData(userId)
+          fetchLeaveBalance(userId)
+          setOpenCategory(null)
+      }
+  }
+
+  // 休暇申請の取り下げ
+  const handleLeaveCancel = async () => {
+      if (!currentLeaveApp) return
+      if (!confirm('この申請を取り下げますか？\n（管理者の画面からも削除されます）')) return
+      
+      const { error } = await supabase.from('leave_applications').delete().eq('id', currentLeaveApp.id)
+      
+      if (error) alert('エラー: ' + error.message)
+      else {
+          alert('申請を取り下げました。')
+          fetchData(userId)
+          setOpenCategory(null)
+      }
   }
 
   const handleSave = async (e: React.FormEvent) => {
@@ -283,11 +384,59 @@ export default function Home() {
     const master = masterSchedules.find(m => m.date === dateStr)
     const calData = schoolCalendar.find(c => c.date === dateStr)
     const allowance = allowances.find(i => i.date === dateStr)
-    let label = ''; let labelColor = 'text-black'
-    if (schedule?.work_pattern_code) { label = schedule.work_pattern_code; if (label.includes('休')) labelColor = 'text-red-600' }
-    else if (master?.work_pattern_code) { label = master.work_pattern_code }
-    else { if (calData?.day_type?.includes('休')) { label = '休'; labelColor = 'text-red-600' } }
-    return ( <div className="flex flex-col items-center justify-start h-8">{label && <span className={`text-[10px] font-extrabold leading-none ${labelColor}`}>{label}</span>}{allowance && <span className="text-[9px] font-bold text-black leading-tight -mt-0.5">¥{allowance.amount.toLocaleString()}</span>}</div> )
+    const leave = leaveApps.find(l => l.date === dateStr)
+
+    let label = ''
+    let labelColor = 'text-gray-400' // マスタデータはデフォルト灰色
+    let bgColor = ''
+    
+    // 優先度1: 休暇申請 (pending=黄色背景, approved=緑背景)
+    if (leave) {
+        const shortName = leave.leave_type.replace('年次有給休暇', '年休').replace('休暇', '')
+        if (leave.status === 'pending') {
+            label = `${shortName}(仮)`
+            labelColor = 'text-yellow-800 font-bold'
+            bgColor = 'bg-yellow-100'
+        } else if (leave.status === 'approved') {
+            label = shortName
+            labelColor = 'text-green-700 font-bold'
+            bgColor = 'bg-green-100'
+        } else if (leave.status === 'rejected') {
+            label = `${shortName}(否)`
+            labelColor = 'text-gray-400'
+        }
+    } 
+    // 優先度2: ユーザー変更の勤務パターン（黒字）
+    else if (schedule?.work_pattern_code) { 
+        label = schedule.work_pattern_code
+        labelColor = 'text-black font-bold' // ユーザー変更は黒字
+        if (label.includes('休')) labelColor = 'text-red-600 font-bold'
+    } 
+    // 優先度3: マスタ勤務パターン（灰色）
+    else if (master?.work_pattern_code) { 
+        label = master.work_pattern_code
+        labelColor = 'text-gray-400' // マスタは灰色
+        if (label.includes('休')) labelColor = 'text-red-400'
+    } 
+    // 優先度4: 休日カレンダー
+    else { 
+        if (calData?.day_type?.includes('休')) { 
+            label = '休'
+            labelColor = 'text-red-600 font-bold'
+        } 
+    }
+
+    // 手当申請がある場合は背景を薄い灰色に
+    if (allowance && !bgColor) {
+        bgColor = 'bg-slate-50'
+    }
+
+    return ( 
+        <div className={`flex flex-col items-center justify-start h-8 w-full rounded ${bgColor}`}>
+            {label && <span className={`text-[10px] leading-none ${labelColor}`}>{label}</span>}
+            {allowance && <span className="text-[9px] font-bold text-blue-600 leading-tight -mt-0.5">¥{allowance.amount.toLocaleString()}</span>}
+        </div> 
+    )
   }
   
   const currentPatternDetail = workPatterns.find(p => p.code === selectedPattern)
@@ -362,15 +511,70 @@ export default function Home() {
               </div>
             </div>
 
+            {/* 休暇申請エリア */}
+            <div className={`bg-white rounded-xl border transition-all ${openCategory === 'application' ? 'border-orange-400 ring-2 ring-orange-100' : currentLeaveApp ? 'border-orange-300 bg-orange-50' : 'border-slate-200'}`}>
+              <button disabled={isSchedLocked} type="button" onClick={() => setOpenCategory(openCategory === 'application' ? null : 'application')} className="w-full flex justify-between items-center p-3 text-left">
+                 <div className="flex items-center gap-2">
+                     <span className="text-lg">📄</span>
+                     <span className={`text-xs font-bold ${currentLeaveApp ? 'text-orange-600' : 'text-black'}`}>休暇・欠勤届 {currentLeaveApp && '(申請有)'}</span>
+                 </div>
+                <span className="text-slate-400 text-xs">{openCategory === 'application' ? '▲ 閉じる' : '申請する +'}</span>
+              </button>
+              {(openCategory === 'application' || currentLeaveApp) && (
+                <div className="p-3 pt-0 border-t border-slate-100 bg-orange-50/30 rounded-b-xl space-y-3">
+                   {currentLeaveApp && <div className="text-xs text-orange-600 font-bold bg-white p-2 rounded border border-orange-200 mb-2">ステータス: {currentLeaveApp.status === 'pending' ? '⏳ 申請中 (管理職承認待ち)' : currentLeaveApp.status === 'approved' ? '🈴 承認済み' : '却下'}</div>}
+                   
+                   {/* 年休残高表示 */}
+                   {leaveBalance && leaveType === '年次有給休暇' && (
+                       <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
+                           <div className="text-xs font-bold text-blue-700 mb-1">年休残高</div>
+                           <div className="text-sm font-bold text-blue-900">
+                               残り: {hoursToDisplayFormat(leaveBalance.annual_leave_total - leaveBalance.annual_leave_used)}
+                           </div>
+                           {openCategory === 'application' && (
+                               <div className="text-xs text-blue-600 mt-2">
+                                   申請後: {hoursToDisplayFormat(leaveBalance.annual_leave_total - leaveBalance.annual_leave_used - durationToHours(leaveDuration))}
+                               </div>
+                           )}
+                       </div>
+                   )}
+                   
+                   {!isSchedLocked ? (
+                       <div className="space-y-2">
+                           <div>
+                               <label className="block text-xs font-bold text-slate-500 mb-1">種類</label>
+                               <select value={leaveType} onChange={(e) => setLeaveType(e.target.value)} className="w-full p-2 text-sm border rounded bg-white font-bold">{LEAVE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}</select>
+                           </div>
+                           <div>
+                               <label className="block text-xs font-bold text-slate-500 mb-1">期間</label>
+                               <select value={leaveDuration} onChange={(e) => setLeaveDuration(e.target.value)} className="w-full p-2 text-sm border rounded bg-white font-bold">{LEAVE_DURATIONS.map(d => <option key={d} value={d}>{d}</option>)}</select>
+                           </div>
+                           <div>
+                               <label className="block text-xs font-bold text-slate-500 mb-1">事由</label>
+                               <input type="text" value={leaveReason} onChange={(e) => setLeaveReason(e.target.value)} placeholder="例: 私用のため" className="w-full p-2 text-sm border rounded bg-white" />
+                           </div>
+                           <div className="flex gap-2 pt-2">
+                               <button type="button" onClick={handleLeaveApply} className="flex-1 bg-orange-500 text-white font-bold py-2 rounded shadow text-xs">
+                                   {currentLeaveApp ? '内容を修正して再申請' : '届出を送信'}
+                               </button>
+                               {currentLeaveApp && <button type="button" onClick={handleLeaveCancel} className="bg-slate-200 text-slate-500 font-bold py-2 px-4 rounded shadow text-xs">取下</button>}
+                           </div>
+                       </div>
+                   ) : (
+                       <div className="text-xs text-slate-400">※ロック中のため編集できません</div>
+                   )}
+                </div>
+              )}
+            </div>
+
             <div className={`bg-white rounded-xl border transition-all ${isSchedLocked ? 'border-gray-200 opacity-60 pointer-events-none bg-gray-50' : openCategory === 'leave' ? 'border-green-400 ring-2 ring-green-100' : hasLeave ? 'border-green-300' : 'border-slate-200'}`}>
               <button disabled={isSchedLocked} type="button" onClick={() => setOpenCategory(openCategory === 'leave' ? null : 'leave')} className="w-full flex justify-between items-center p-3 text-left">
-                 <div className="flex items-center gap-2"><span className="text-lg">🌴</span><span className={`text-xs font-bold ${hasLeave ? 'text-green-600' : 'text-black'}`}>休暇・欠勤 {isSchedLocked && '(編集不可)'}</span></div>
+                 <div className="flex items-center gap-2"><span className="text-lg">⏱</span><span className={`text-xs font-bold ${hasLeave ? 'text-green-600' : 'text-black'}`}>時間休・その他 {isSchedLocked && '(編集不可)'}</span></div>
                 <span className="text-slate-400 text-xs">{openCategory === 'leave' ? '▲ 閉じる' : hasLeave ? '詳細あり ▼' : '追加する +'}</span>
               </button>
               {(openCategory === 'leave' || hasLeave) && (
                 <div className="p-3 pt-0 border-t border-slate-100 bg-green-50/30 rounded-b-xl space-y-3">
-                   {openCategory === 'leave' && (<div className="mb-2"><div className="flex flex-wrap gap-2"><button type="button" onClick={() => updateDetail('leave_annual', details['leave_annual'] ? '' : '1日')} className={`text-xs px-2 py-1 rounded border font-bold ${details['leave_annual'] ? 'bg-green-500 text-white border-green-600' : 'bg-white text-black border-slate-300'}`}>年休(1日/半日)</button>{LEAVE_ITEMS_TIME.map(item => (<button key={item.key} type="button" onClick={() => updateDetail(item.key, details[item.key] ? '' : '00:00')} className={`text-xs px-2 py-1 rounded border font-bold ${details[item.key] ? 'bg-green-500 text-white border-green-600' : 'bg-white text-black border-slate-300'}`}>{item.label}</button>))}</div></div>)}
-                   {details['leave_annual'] !== undefined && (<div className="flex items-center gap-2 animate-fadeIn bg-white p-2 rounded border border-green-200"><span className="text-xs font-bold text-green-700 w-12">年休</span><div className="flex gap-2"><label className="flex items-center gap-1 cursor-pointer"><input type="radio" checked={details['leave_annual'] === '1日'} onChange={() => updateDetail('leave_annual', '1日')} className="accent-green-600" /><span className="text-xs text-black font-bold">1日</span></label><label className="flex items-center gap-1 cursor-pointer"><input type="radio" checked={details['leave_annual'] === '半日'} onChange={() => updateDetail('leave_annual', '半日')} className="accent-green-600" /><span className="text-xs text-black font-bold">半日</span></label></div><button type="button" onClick={() => updateDetail('leave_annual', '')} className="ml-auto text-slate-400 hover:text-red-500">×</button></div>)}
+                   {openCategory === 'leave' && (<div className="mb-2"><div className="flex flex-wrap gap-2">{LEAVE_ITEMS_TIME.map(item => (<button key={item.key} type="button" onClick={() => updateDetail(item.key, details[item.key] ? '' : '00:00')} className={`text-xs px-2 py-1 rounded border font-bold ${details[item.key] ? 'bg-green-500 text-white border-green-600' : 'bg-white text-black border-slate-300'}`}>{item.label}</button>))}</div></div>)}
                    {LEAVE_ITEMS_TIME.filter(i => details[i.key] !== undefined).map(item => (<div key={item.key} className="flex items-center gap-2 animate-fadeIn"><label className="text-xs font-bold text-black w-24 truncate">{item.label}</label><input type="text" placeholder="時間" value={details[item.key] || ''} onChange={(e) => updateDetail(item.key, e.target.value)} className="flex-1 p-2 rounded border border-slate-300 text-sm text-black font-bold" /><button type="button" onClick={() => updateDetail(item.key, '')} className="text-slate-400 hover:text-red-500">×</button></div>))}
                 </div>
               )}
@@ -382,10 +586,44 @@ export default function Home() {
             <div className={`${isAllowLocked ? 'opacity-60 pointer-events-none grayscale' : ''}`}>
                 <div>
                 <label className="block text-xs font-bold text-black mb-1">部活動 業務内容 {isAllowLocked && '(編集不可)'}</label>
-                <select disabled={isAllowLocked} value={activityId} onChange={(e) => setActivityId(e.target.value)} className="w-full bg-slate-50 p-3 rounded-lg border border-slate-200 font-bold text-black text-sm">
+                <select 
+                    disabled={isAllowLocked} 
+                    value={activityId} 
+                    onChange={(e) => {
+                        const newActivityId = e.target.value
+                        const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
+                        const validation = canSelectActivity(newActivityId, isWorkDay)
+                        if (!validation.allowed) {
+                            alert(validation.message)
+                            return
+                        }
+                        setActivityId(newActivityId)
+                    }} 
+                    className="w-full bg-slate-50 p-3 rounded-lg border border-slate-200 font-bold text-black text-sm"
+                >
                     <option value="">なし (部活なし)</option>
-                    {ACTIVITY_TYPES.map(type => <option key={type.id} value={type.id}>{type.label}</option>)}
+                    {ACTIVITY_TYPES.map(type => {
+                        const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
+                        const validation = canSelectActivity(type.id, isWorkDay)
+                        return (
+                            <option 
+                                key={type.id} 
+                                value={type.id}
+                                disabled={!validation.allowed}
+                            >
+                                {type.label} {!validation.allowed ? '(勤務日不可)' : ''}
+                            </option>
+                        )
+                    })}
                 </select>
+                {activityId && (() => {
+                    const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
+                    const validation = canSelectActivity(activityId, isWorkDay)
+                    if (!validation.allowed) {
+                        return <div className="text-xs text-red-600 mt-1 font-bold">⚠️ {validation.message}</div>
+                    }
+                    return null
+                })()}
                 </div>
                 {activityId && (
                 <>
