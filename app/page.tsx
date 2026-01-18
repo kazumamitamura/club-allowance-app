@@ -30,7 +30,7 @@ type WorkPattern = { id: number, code: string, start_time: string, end_time: str
 type DailySchedule = { id: number, user_id: string, date: string, work_pattern_code: string | null, [key: string]: any }
 type SchoolCalendar = { date: string, day_type: string }
 type MasterSchedule = { date: string, work_pattern_code: string }
-type LeaveApplication = { id: number, user_id: string, date: string, leave_type: string, duration?: string, duration_type?: string, reason: string, status: string }
+type LeaveApplication = { id: number, user_id: string, date: string, leave_type: string, duration?: string, duration_type?: string, hours_used?: number, reason: string, status: string }
 
 const formatDate = (date: Date) => {
   const y = date.getFullYear()
@@ -75,11 +75,12 @@ export default function Home() {
   // 休暇申請入力用
   const [leaveType, setLeaveType] = useState('年次有給休暇')
   const [leaveDuration, setLeaveDuration] = useState('1日')
+  const [leaveHours, setLeaveHours] = useState(1) // 時間休の時間数
   const [leaveReason, setLeaveReason] = useState('')
   const [currentLeaveApp, setCurrentLeaveApp] = useState<LeaveApplication | null>(null)
 
   const [activityId, setActivityId] = useState('')
-  const [destinationId, setDestinationId] = useState('school')
+  const [destinationId, setDestinationId] = useState('kannai')
   const [destinationDetail, setDestinationDetail] = useState('')
   const [isDriving, setIsDriving] = useState(false)
   const [isAccommodation, setIsAccommodation] = useState(false)
@@ -231,22 +232,30 @@ export default function Home() {
       setCurrentLeaveApp(leaveApp || null)
       if (leaveApp) {
           setLeaveType(leaveApp.leave_type)
-          setLeaveDuration(leaveApp.duration_type || leaveApp.duration || '1日') // ★修正: duration_type優先
+          const durationType = leaveApp.duration_type || leaveApp.duration || '1日'
+          setLeaveDuration(durationType)
+          // 時間休の場合は hours_used から時間数を復元
+          if (durationType === '時間休' && leaveApp.hours_used) {
+              setLeaveHours(leaveApp.hours_used)
+          } else {
+              setLeaveHours(1)
+          }
           setLeaveReason(leaveApp.reason || '')
       } else {
           setLeaveType('年次有給休暇')
           setLeaveDuration('1日')
+          setLeaveHours(1)
           setLeaveReason('')
       }
 
       const allowance = allowances.find(a => a.date === dateStr)
       if (allowance) {
         setActivityId(allowance.activity_type === allowance.activity_type ? (ACTIVITY_TYPES.find(t => t.label === allowance.activity_type)?.id || allowance.activity_type) : '')
-        setDestinationId(DESTINATIONS.find(d => d.label === allowance.destination_type)?.id || 'school')
+        setDestinationId(DESTINATIONS.find(d => d.label === allowance.destination_type)?.id || 'kannai')
         setDestinationDetail(allowance.destination_detail || '')
         setIsDriving(allowance.is_driving); setIsAccommodation(allowance.is_accommodation)
       } else {
-        setActivityId(''); setDestinationId('school'); setDestinationDetail(''); setIsDriving(false); setIsAccommodation(false)
+        setActivityId(''); setDestinationId('kannai'); setDestinationDetail(''); setIsDriving(false); setIsAccommodation(false)
       }
     }
     updateDayInfo()
@@ -263,9 +272,12 @@ export default function Home() {
       console.warn(validation.message)
     }
     
-    const amt = calculateAmount(activityId, isDriving, destinationId, isWorkDay)
+    // 半日判定（指定大会用）- 将来的に半日フラグを追加する場合
+    const isHalfDay = false
+    
+    const amt = calculateAmount(activityId, isDriving, destinationId, isWorkDay, isAccommodation, isHalfDay)
     setCalculatedAmount(amt)
-  }, [activityId, isDriving, destinationId, dayType])
+  }, [activityId, isDriving, destinationId, dayType, isAccommodation])
 
   const updateDetail = (key: string, value: string) => {
     setDetails((prev: any) => { const next = { ...prev }; if (value === '') delete next[key]; else next[key] = value; return next })
@@ -275,14 +287,21 @@ export default function Home() {
   const handleLeaveApply = async () => {
       const dateStr = formatDate(selectedDate)
       
-      // 時間単位で計算
-      const hoursUsed = durationToHours(leaveDuration)
+      // 時間単位で計算（時間休の場合は入力値、それ以外は自動計算）
+      let hoursUsed = 0
+      if (leaveDuration === '時間休') {
+          hoursUsed = leaveHours
+      } else if (leaveDuration === '1日') {
+          hoursUsed = 8
+      } else if (leaveDuration === '半日(午前)' || leaveDuration === '半日(午後)') {
+          hoursUsed = 4
+      }
       
       const { error } = await supabase.from('leave_applications').upsert({
           user_id: userId,
           date: dateStr,
           leave_type: leaveType,
-          duration_type: leaveDuration, // ★修正: duration → duration_type
+          duration_type: leaveDuration,
           hours_used: hoursUsed,
           reason: leaveReason,
           status: 'pending'
@@ -532,8 +551,18 @@ export default function Home() {
                                残り: {hoursToDisplayFormat(leaveBalance.annual_leave_total - leaveBalance.annual_leave_used)}
                            </div>
                            {openCategory === 'application' && (
-                               <div className="text-xs text-blue-600 mt-2">
-                                   申請後: {hoursToDisplayFormat(leaveBalance.annual_leave_total - leaveBalance.annual_leave_used - durationToHours(leaveDuration))}
+                               <div className="text-xs text-blue-600 mt-2 border-t border-blue-200 pt-2">
+                                   申請後: {(() => {
+                                       let hoursToUse = 0
+                                       if (leaveDuration === '時間休') {
+                                           hoursToUse = leaveHours
+                                       } else if (leaveDuration === '1日') {
+                                           hoursToUse = 8
+                                       } else if (leaveDuration === '半日(午前)' || leaveDuration === '半日(午後)') {
+                                           hoursToUse = 4
+                                       }
+                                       return hoursToDisplayFormat(leaveBalance.annual_leave_total - leaveBalance.annual_leave_used - hoursToUse)
+                                   })()}
                                </div>
                            )}
                        </div>
@@ -549,6 +578,39 @@ export default function Home() {
                                <label className="block text-xs font-bold text-slate-500 mb-1">期間</label>
                                <select value={leaveDuration} onChange={(e) => setLeaveDuration(e.target.value)} className="w-full p-2 text-sm border rounded bg-white font-bold text-black">{LEAVE_DURATIONS.map(d => <option key={d} value={d}>{d}</option>)}</select>
                            </div>
+                           {/* 時間休の場合のみ時間数入力を表示 */}
+                           {leaveDuration === '時間休' && (
+                               <div className="bg-yellow-50 p-3 rounded-lg border border-yellow-200">
+                                   <label className="block text-xs font-bold text-slate-700 mb-2">時間数（1〜7時間）</label>
+                                   <div className="flex items-center gap-2">
+                                       <input 
+                                           type="number" 
+                                           min="1" 
+                                           max="7" 
+                                           value={leaveHours} 
+                                           onChange={(e) => setLeaveHours(Math.max(1, Math.min(7, parseInt(e.target.value) || 1)))}
+                                           className="w-20 p-2 text-sm border rounded bg-white text-black font-bold text-center"
+                                       />
+                                       <span className="text-sm text-slate-600">時間</span>
+                                       <div className="flex-1 flex gap-1">
+                                           {[1, 2, 3, 4, 5, 6, 7].map(h => (
+                                               <button
+                                                   key={h}
+                                                   type="button"
+                                                   onClick={() => setLeaveHours(h)}
+                                                   className={`flex-1 px-2 py-1 text-xs rounded font-bold transition ${
+                                                       leaveHours === h 
+                                                           ? 'bg-yellow-500 text-white' 
+                                                           : 'bg-white text-slate-600 border border-slate-300 hover:bg-yellow-100'
+                                                   }`}
+                                               >
+                                                   {h}
+                                               </button>
+                                           ))}
+                                       </div>
+                                   </div>
+                               </div>
+                           )}
                            <div>
                                <label className="block text-xs font-bold text-slate-500 mb-1">事由</label>
                                <input type="text" value={leaveReason} onChange={(e) => setLeaveReason(e.target.value)} placeholder="例: 私用のため" className="w-full p-2 text-sm border rounded bg-white text-black" />
@@ -598,6 +660,8 @@ export default function Home() {
                             return
                         }
                         setActivityId(newActivityId)
+                        // デフォルトの行き先をリセット
+                        setDestinationId('kannai')
                     }} 
                     className="w-full bg-slate-50 p-3 rounded-lg border border-slate-200 font-bold text-black text-sm"
                 >
@@ -628,14 +692,98 @@ export default function Home() {
                 {activityId && (
                 <>
                     <div className="grid grid-cols-2 gap-2 mt-2">
-                    <div><label className="block text-xs font-bold text-black mb-1">区分</label><select disabled={isAllowLocked} value={destinationId} onChange={(e) => setDestinationId(e.target.value)} className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-black font-bold">{DESTINATIONS.map(d => <option key={d.id} value={d.id}>{d.label}</option>)}</select></div>
-                    <div><label className="block text-xs font-bold text-black mb-1">詳細</label><input disabled={isAllowLocked} type="text" placeholder="例: 県体育館" value={destinationDetail} onChange={(e) => setDestinationDetail(e.target.value)} className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-black font-bold" /></div>
+                        <div>
+                            <label className="block text-xs font-bold text-black mb-1">行き先（区分）</label>
+                            <select 
+                                disabled={isAllowLocked} 
+                                value={destinationId} 
+                                onChange={(e) => setDestinationId(e.target.value)} 
+                                className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-black font-bold"
+                            >
+                                {DESTINATIONS.map(d => <option key={d.id} value={d.id}>{d.label}</option>)}
+                            </select>
+                        </div>
+                        <div>
+                            <label className="block text-xs font-bold text-black mb-1">詳細</label>
+                            <input 
+                                disabled={isAllowLocked} 
+                                type="text" 
+                                placeholder="例: 県体育館" 
+                                value={destinationDetail} 
+                                onChange={(e) => setDestinationDetail(e.target.value)} 
+                                className="w-full bg-white p-3 rounded-lg border border-slate-200 text-xs text-black font-bold" 
+                            />
+                        </div>
                     </div>
+                    
+                    {/* 運転・宿泊フラグ */}
                     <div className="flex gap-3 mt-2">
-                    <label className={`flex-1 p-3 rounded-lg cursor-pointer border text-center text-xs font-bold ${isDriving ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-400'}`}><input disabled={isAllowLocked} type="checkbox" checked={isDriving} onChange={e => setIsDriving(e.target.checked)} className="hidden" />🚗 運転あり</label>
-                    <label className={`flex-1 p-3 rounded-lg cursor-pointer border text-center text-xs font-bold ${isAccommodation ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-400'}`}><input disabled={isAllowLocked} type="checkbox" checked={isAccommodation} onChange={e => setIsAccommodation(e.target.checked)} className="hidden" />🏨 宿泊あり</label>
+                        <label className={`flex-1 p-3 rounded-lg cursor-pointer border text-center text-xs font-bold ${isDriving ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-400'}`}>
+                            <input 
+                                disabled={isAllowLocked} 
+                                type="checkbox" 
+                                checked={isDriving} 
+                                onChange={e => setIsDriving(e.target.checked)} 
+                                className="hidden" 
+                            />
+                            🚗 運転あり
+                        </label>
+                        <label className={`flex-1 p-3 rounded-lg cursor-pointer border text-center text-xs font-bold ${isAccommodation ? 'border-blue-500 bg-blue-50 text-blue-600' : 'border-slate-200 text-slate-400'}`}>
+                            <input 
+                                disabled={isAllowLocked} 
+                                type="checkbox" 
+                                checked={isAccommodation} 
+                                onChange={e => setIsAccommodation(e.target.checked)} 
+                                className="hidden" 
+                            />
+                            🏨 宿泊あり
+                        </label>
                     </div>
-                    <div className="bg-slate-800 text-white p-4 rounded-xl flex justify-between items-center mt-2"><span className="text-xs font-medium">支給予定額</span><span className="text-xl font-bold">¥{calculatedAmount.toLocaleString()}</span></div>
+                    
+                    {/* 計算ロジック説明 */}
+                    <div className="bg-blue-50 p-3 rounded-lg border border-blue-200 mt-2">
+                        <div className="text-xs text-blue-700 mb-1">
+                            <span className="font-bold">📋 計算内訳:</span>
+                        </div>
+                        <div className="text-xs text-slate-600">
+                            {(() => {
+                                const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
+                                
+                                if (activityId === 'A') return '休日部活(1日): 2,400円'
+                                if (activityId === 'B') return '休日部活(半日): 1,700円'
+                                if (activityId === 'C') {
+                                    if (!isDriving) return '指定大会（基本）: 3,400円'
+                                    if (destinationId === 'kannai') return '指定大会（管内運転）: 3,400円'
+                                    if (destinationId === 'kennai_short' || destinationId === 'kennai_long') return '指定大会（県内運転）: 7,500円'
+                                    if (destinationId === 'kengai') return '指定大会（県外運転）: 15,000円'
+                                }
+                                if (activityId === 'E' || activityId === 'F') {
+                                    if (isWorkDay) {
+                                        if (!isDriving && isAccommodation) return '勤務日（宿泊のみ）: 2,400円'
+                                        if (!isDriving) return '勤務日（運転なし）: 0円'
+                                        if (destinationId === 'kannai' || destinationId === 'kennai_short') {
+                                            return isAccommodation ? '勤務日（県内運転＋宿泊）: 7,500円' : '勤務日（県内運転）: 5,100円'
+                                        }
+                                        return isAccommodation ? '勤務日（県外運転＋宿泊）: 15,000円' : '勤務日（県外運転）: 12,600円'
+                                    } else {
+                                        if (!isDriving) return '休日（運転なし）: 2,400円'
+                                        if (destinationId === 'kannai') return '休日（管内運転）: 2,400円'
+                                        if (destinationId === 'kennai_short') return '休日（県内運転）: 7,500円'
+                                        return '休日（県外運転）: 15,000円'
+                                    }
+                                }
+                                if (activityId === 'G') return '研修旅行等引率: 3,400円'
+                                if (activityId === 'H') return '宿泊指導: 2,400円'
+                                if (activityId === 'DISASTER') return '非常災害: 6,000円'
+                                return '計算中...'
+                            })()}
+                        </div>
+                    </div>
+                    
+                    <div className="bg-slate-800 text-white p-4 rounded-xl flex justify-between items-center mt-2">
+                        <span className="text-xs font-medium">支給予定額</span>
+                        <span className="text-xl font-bold">¥{calculatedAmount.toLocaleString()}</span>
+                    </div>
                 </>
                 )}
             </div>
