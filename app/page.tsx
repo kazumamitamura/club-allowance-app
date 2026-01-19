@@ -30,7 +30,17 @@ type WorkPattern = { id: number, code: string, start_time: string, end_time: str
 type DailySchedule = { id: number, user_id: string, date: string, work_pattern_code: string | null, [key: string]: any }
 type SchoolCalendar = { date: string, day_type: string }
 type MasterSchedule = { date: string, work_pattern_code: string }
-type LeaveApplication = { id: number, user_id: string, date: string, leave_type: string, duration?: string, duration_type?: string, hours_used?: number, reason: string, status: string }
+type LeaveApplication = { 
+  id: number
+  user_id: string
+  date: string
+  leave_type: string
+  duration_type: string  // 必須：期間タイプ
+  hours_used: number     // 必須：消費時間（整数）
+  reason: string
+  status: string
+  duration?: string      // 旧カラム（後方互換性のため残す）
+}
 
 const formatDate = (date: Date) => {
   const y = date.getFullYear()
@@ -301,6 +311,12 @@ export default function Home() {
   const handleLeaveApply = async () => {
       const dateStr = formatDate(selectedDate)
       
+      // バリデーション：時間休の場合は時間数が必須
+      if (leaveDuration === '時間休' && (!leaveHours || leaveHours < 1 || leaveHours > 8)) {
+          alert('時間休を選択した場合は、1〜8時間の範囲で時間数を入力してください。')
+          return
+      }
+      
       // 時間単位で計算（時間休の場合は入力値、それ以外は自動計算）
       let hoursUsed = 0
       if (leaveDuration === '時間休') {
@@ -311,7 +327,18 @@ export default function Home() {
           hoursUsed = 4
       }
       
-      const { error } = await supabase.from('leave_applications').upsert({
+      // デバッグ用ログ（本番環境では削除推奨）
+      console.log('休暇申請データ:', {
+          user_id: userId,
+          date: dateStr,
+          leave_type: leaveType,
+          duration_type: leaveDuration,
+          hours_used: hoursUsed,
+          reason: leaveReason,
+          status: 'pending'
+      })
+      
+      const { data, error } = await supabase.from('leave_applications').upsert({
           user_id: userId,
           date: dateStr,
           leave_type: leaveType,
@@ -321,8 +348,10 @@ export default function Home() {
           status: 'pending'
       }, { onConflict: 'user_id, date' })
 
-      if (error) alert('エラー: ' + error.message)
-      else {
+      if (error) {
+          console.error('休暇申請エラー:', error)
+          alert('エラー: ' + error.message + '\n\nDBテーブルに duration_type と hours_used カラムが存在することを確認してください。')
+      } else {
           alert(currentLeaveApp ? '申請内容を修正しました！' : '休暇届を申請しました！\n（管理者の承認待ち状態です）')
           fetchData(userId)
           fetchLeaveBalance(userId)
