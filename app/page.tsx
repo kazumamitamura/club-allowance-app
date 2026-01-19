@@ -503,7 +503,7 @@ export default function Home() {
         <div className={`flex flex-col items-start justify-start w-full h-full p-1 ${bgColor} rounded-lg`}>
             {/* 勤務パターン/休暇 */}
             {scheduleLabel && (
-                <div className={`px-2 py-0.5 rounded-md ${leave ? 'bg-yellow-200' : leave?.status === 'approved' ? 'bg-green-200' : ''}`}>
+                <div className={`px-2 py-0.5 rounded-md ${leave ? (leave.status === 'approved' ? 'bg-green-200' : 'bg-yellow-200') : ''}`}>
                     <span className={`text-xs ${scheduleLabelColor}`}>{scheduleLabel}</span>
                 </div>
             )}
