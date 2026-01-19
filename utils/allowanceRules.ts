@@ -13,15 +13,15 @@ export const ACTIVITY_TYPES = [
     { id: 'OTHER', label: 'その他', requiresHoliday: false },
   ]
   
-  export const DESTINATIONS = [
-    { id: 'kannai', label: '管内（庄内・新庄最上）' },
-    { id: 'kennai_short', label: '県内（片道120km未満）' },
-    { id: 'kennai_long', label: '県内（片道120km以上）' },
-    { id: 'kengai', label: '県外（片道500km以内）' },
+export const DESTINATIONS = [
+    { id: 'school', label: '校内' },
+    { id: 'inside_short', label: '管内（庄内・新庄最上）' },
+    { id: 'inside_long', label: '県内（片道120km以上）' },
+    { id: 'outside', label: '県外' },
 ]
 
 /**
- * 手当金額計算（規約完全準拠版）
+ * 手当金額計算（運転判定優先版）
  * @param activityId 活動種別
  * @param isDriving 運転の有無
  * @param destinationId 行き先区分
@@ -30,108 +30,96 @@ export const ACTIVITY_TYPES = [
  * @param isHalfDay 半日かどうか（指定大会用）
  * @returns 手当金額
  */
-  export const calculateAmount = (
+export const calculateAmount = (
     activityId: string,
     isDriving: boolean,
     destinationId: string,
     isWorkDay: boolean,
     isAccommodation: boolean = false,
     isHalfDay: boolean = false
-  ): number => {
+): number => {
+    // ===========================================
+    // 【最優先】運転ありの場合の特別ルール
+    // ===========================================
+    if (isDriving) {
+        // 県外への運転は一律 15,000円（活動タイプに関係なく）
+        if (destinationId === 'outside') {
+            // 宿泊がある場合は加算
+            if (isAccommodation && (activityId === 'E' || activityId === 'F')) {
+                return 15000 + 2400
+            }
+            return 15000
+        }
+        
+        // 県内（120km以上）への運転は一律 7,500円
+        if (destinationId === 'inside_long') {
+            // 宿泊がある場合は加算
+            if (isAccommodation && (activityId === 'E' || activityId === 'F')) {
+                return 7500 + 2400
+            }
+            return 7500
+        }
+        
+        // 管内または校内運転の場合は、活動タイプごとのルールに従う
+        if (destinationId === 'inside_short' || destinationId === 'school') {
+            // C. 指定大会の場合
+            if (activityId === 'C') {
+                return 3400
+            }
+            
+            // E, F. 遠征・合宿の場合
+            if (activityId === 'E' || activityId === 'F') {
+                if (isWorkDay) {
+                    // 勤務日の管内運転
+                    if (isAccommodation) {
+                        return 5100 + 2400
+                    }
+                    return 5100
+                } else {
+                    // 休日の管内運転
+                    return 2400
+                }
+            }
+            
+            // その他の活動で管内運転の場合、基本額を適用
+        }
+    }
+    
+    // ===========================================
+    // 運転なしの場合の処理
+    // ===========================================
+    
     // A. 休日部活（1日）
     if (activityId === 'A') {
-        if (isWorkDay) return 0 // 勤務日は支給なし
+        if (isWorkDay) return 0
         return 2400
     }
 
     // B. 休日部活（半日）
     if (activityId === 'B') {
-        if (isWorkDay) return 0 // 勤務日は支給なし
+        if (isWorkDay) return 0
         return 1700
     }
 
     // C. 指定大会（対外運動競技等引率）
     if (activityId === 'C') {
-        // 半日の場合
-        if (isHalfDay) {
-            return 1700
-        }
-
-        // 運転なしの場合
-        if (!isDriving) {
-            return 3400
-        }
-
-        // 運転ありの場合
-        switch (destinationId) {
-            case 'kannai': // 管内（庄内・新庄最上）
-                return 3400
-            case 'kennai_short': // 県内（片道120km未満）
-            case 'kennai_long': // 県内（片道120km以上）
-                return 7500
-            case 'kengai': // 県外（500km以内）
-                return 15000
-            default:
-                return 3400
-        }
+        if (isHalfDay) return 1700
+        return 3400 // 運転なしの基本額
     }
 
-    // D. 指定外大会（従来ロジック維持）
+    // D. 指定外大会
     if (activityId === 'D') {
         return 2400
     }
 
-    // E. 遠征 / F. 合宿（部活動指導手当）
+    // E. 遠征 / F. 合宿（運転なしの場合）
     if (activityId === 'E' || activityId === 'F') {
-        // 休日の場合
-        if (!isWorkDay) {
-            if (!isDriving) {
-                return 2400
-            }
-
-            // 運転ありの場合
-            switch (destinationId) {
-                case 'kannai': // 管内
-                case 'kennai_short': // 県内（片道120km未満）
-                    return 2400
-                case 'kennai_long': // 県内（片道120km以上）
-                    return 7500
-                case 'kengai': // 県外
-                    return 15000
-                default:
-                    return 2400
-            }
-        }
-
-        // 勤務日（授業日）の場合
-        if (!isDriving) {
-            // 宿泊のみの場合
-            if (isAccommodation) {
-                return 2400
-            }
-            return 0 // 運転なし・宿泊なしは支給なし
-        }
-
-        // 勤務日 + 運転ありの場合
-        switch (destinationId) {
-            case 'kannai': // 管内
-            case 'kennai_short': // 県内（片道120km未満）
-                if (isAccommodation) {
-                    return 5100 + 2400 // 運転 + 宿泊
-                }
-                return 5100
-            case 'kennai_long': // 県内（片道120km以上）
-                if (isAccommodation) {
-                    return 12600 + 2400 // 運転 + 宿泊
-                }
-                return 7500
-            case 'kengai': // 県外
-                if (isAccommodation) {
-                    return 12600 + 2400 // 運転 + 宿泊
-                }
-                return 12600
-            default:
-                return 0
+        if (isWorkDay) {
+            // 勤務日は宿泊のみ支給
+            return isAccommodation ? 2400 : 0
+        } else {
+            // 休日は基本額
+            return 2400
         }
     }
 
@@ -145,7 +133,7 @@ export const ACTIVITY_TYPES = [
         return 2400
     }
 
-    // その他（非常災害など）
+    // その他
     if (activityId === 'OTHER') {
         return 6000
     }

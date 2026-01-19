@@ -80,7 +80,7 @@ export default function Home() {
   const [currentLeaveApp, setCurrentLeaveApp] = useState<LeaveApplication | null>(null)
 
   const [activityId, setActivityId] = useState('')
-  const [destinationId, setDestinationId] = useState('kannai')
+  const [destinationId, setDestinationId] = useState('inside_short')
   const [destinationDetail, setDestinationDetail] = useState('')
   const [isDriving, setIsDriving] = useState(false)
   const [isAccommodation, setIsAccommodation] = useState(false)
@@ -251,11 +251,25 @@ export default function Home() {
       const allowance = allowances.find(a => a.date === dateStr)
       if (allowance) {
         setActivityId(allowance.activity_type === allowance.activity_type ? (ACTIVITY_TYPES.find(t => t.label === allowance.activity_type)?.id || allowance.activity_type) : '')
-        setDestinationId(DESTINATIONS.find(d => d.label === allowance.destination_type)?.id || 'kannai')
+        
+        // 古いIDを新しいIDにマッピング（後方互換性）
+        let mappedDestinationId = DESTINATIONS.find(d => d.label === allowance.destination_type)?.id || 'inside_short'
+        // 旧IDから新IDへの変換
+        const idMapping: Record<string, string> = {
+          'kannai': 'inside_short',
+          'kennai_short': 'inside_short',
+          'kennai_long': 'inside_long',
+          'kengai': 'outside'
+        }
+        if (idMapping[mappedDestinationId]) {
+          mappedDestinationId = idMapping[mappedDestinationId]
+        }
+        
+        setDestinationId(mappedDestinationId)
         setDestinationDetail(allowance.destination_detail || '')
         setIsDriving(allowance.is_driving); setIsAccommodation(allowance.is_accommodation)
       } else {
-        setActivityId(''); setDestinationId('kannai'); setDestinationDetail(''); setIsDriving(false); setIsAccommodation(false)
+        setActivityId(''); setDestinationId('inside_short'); setDestinationDetail(''); setIsDriving(false); setIsAccommodation(false)
       }
     }
     updateDayInfo()
@@ -647,7 +661,7 @@ export default function Home() {
                         }
                         setActivityId(newActivityId)
                         // デフォルトの行き先をリセット
-                        setDestinationId('kannai')
+                        setDestinationId('inside_short')
                     }} 
                     className="w-full bg-slate-50 p-3 rounded-lg border border-slate-200 font-bold text-black text-sm"
                 >
@@ -752,28 +766,39 @@ export default function Home() {
                             {(() => {
                                 const isWorkDay = dayType.includes('勤務日') || dayType.includes('授業')
                                 
+                                // 運転ありの場合の最優先ルール
+                                if (isDriving) {
+                                    if (destinationId === 'outside') {
+                                        const baseAmount = 15000
+                                        const total = isAccommodation && (activityId === 'E' || activityId === 'F') ? baseAmount + 2400 : baseAmount
+                                        return `【運転】県外: ${total.toLocaleString()}円${isAccommodation ? ' (運転15,000円＋宿泊2,400円)' : ''}`
+                                    }
+                                    if (destinationId === 'inside_long') {
+                                        const baseAmount = 7500
+                                        const total = isAccommodation && (activityId === 'E' || activityId === 'F') ? baseAmount + 2400 : baseAmount
+                                        return `【運転】県内120km以上: ${total.toLocaleString()}円${isAccommodation ? ' (運転7,500円＋宿泊2,400円)' : ''}`
+                                    }
+                                    if (destinationId === 'inside_short' || destinationId === 'school') {
+                                        if (activityId === 'C') return '【運転】指定大会（管内）: 3,400円'
+                                        if (activityId === 'E' || activityId === 'F') {
+                                            if (isWorkDay) {
+                                                return isAccommodation ? '【運転】勤務日（管内＋宿泊）: 7,500円' : '【運転】勤務日（管内）: 5,100円'
+                                            }
+                                            return '【運転】休日（管内）: 2,400円'
+                                        }
+                                    }
+                                }
+                                
+                                // 運転なしの場合
                                 if (activityId === 'A') return '休日部活(1日): 2,400円'
                                 if (activityId === 'B') return '休日部活(半日): 1,700円'
-                                if (activityId === 'C') {
-                                    if (!isDriving) return '指定大会（基本）: 3,400円'
-                                    if (destinationId === 'kannai') return '指定大会（管内運転）: 3,400円'
-                                    if (destinationId === 'kennai_short' || destinationId === 'kennai_long') return '指定大会（県内運転）: 7,500円'
-                                    if (destinationId === 'kengai') return '指定大会（県外運転）: 15,000円'
-                                }
+                                if (activityId === 'C') return '指定大会（運転なし）: 3,400円'
+                                if (activityId === 'D') return '指定外大会: 2,400円'
                                 if (activityId === 'E' || activityId === 'F') {
                                     if (isWorkDay) {
-                                        if (!isDriving && isAccommodation) return '勤務日（宿泊のみ）: 2,400円'
-                                        if (!isDriving) return '勤務日（運転なし）: 0円'
-                                        if (destinationId === 'kannai' || destinationId === 'kennai_short') {
-                                            return isAccommodation ? '勤務日（県内運転＋宿泊）: 7,500円' : '勤務日（県内運転）: 5,100円'
-                                        }
-                                        return isAccommodation ? '勤務日（県外運転＋宿泊）: 15,000円' : '勤務日（県外運転）: 12,600円'
-                                    } else {
-                                        if (!isDriving) return '休日（運転なし）: 2,400円'
-                                        if (destinationId === 'kannai') return '休日（管内運転）: 2,400円'
-                                        if (destinationId === 'kennai_short') return '休日（県内運転）: 7,500円'
-                                        return '休日（県外運転）: 15,000円'
+                                        return isAccommodation ? '勤務日（宿泊のみ）: 2,400円' : '勤務日（運転なし）: 0円'
                                     }
+                                    return '休日（運転なし）: 2,400円'
                                 }
                                 if (activityId === 'G') return '研修旅行等引率: 3,400円'
                                 if (activityId === 'H') return '宿泊指導: 2,400円'
