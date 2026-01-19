@@ -79,6 +79,9 @@ export default function Home() {
 
   // 氏名登録モーダル用
   const [showProfileModal, setShowProfileModal] = useState(false)
+  
+  // 入力フォームモーダル用
+  const [showInputModal, setShowInputModal] = useState(false)
   const [inputLastName, setInputLastName] = useState('')
   const [inputFirstName, setInputFirstName] = useState('')
 
@@ -356,6 +359,7 @@ export default function Home() {
           fetchData(userId)
           fetchLeaveBalance(userId)
           setOpenCategory(null)
+          setShowInputModal(false)
       }
   }
 
@@ -395,7 +399,7 @@ export default function Home() {
             await supabase.from('allowances').delete().eq('user_id', user.id).eq('date', dateStr)
         }
     }
-    fetchData(user.id); setIsRegistered(true); setOpenCategory(null)
+    fetchData(user.id); setIsRegistered(true); setOpenCategory(null); setShowInputModal(false)
     if (isSchedLocked) alert('手当のみ保存しました (勤務表は申請済)')
     else if (isAllowLocked) alert('勤務表のみ保存しました (手当は申請済)')
     else alert('保存しました')
@@ -438,6 +442,12 @@ export default function Home() {
   const handlePrevMonth = () => { const d = new Date(selectedDate); d.setMonth(d.getMonth() - 1); setSelectedDate(d) }
   const handleNextMonth = () => { const d = new Date(selectedDate); d.setMonth(d.getMonth() + 1); setSelectedDate(d) }
   const calculateMonthTotal = () => { const m = selectedDate.getMonth(), y = selectedDate.getFullYear(); return allowances.filter(i => { const d = new Date(i.date); return d.getMonth() === m && d.getFullYear() === y }).reduce((s, i) => s + i.amount, 0) }
+  
+  // カレンダー日付クリック時の処理
+  const handleDateClick = (date: Date) => {
+    setSelectedDate(date)
+    setShowInputModal(true)
+  }
 
   const getTileContent = ({ date, view }: { date: Date; view: string }) => {
     if (view !== 'month') return null
@@ -448,55 +458,69 @@ export default function Home() {
     const allowance = allowances.find(i => i.date === dateStr)
     const leave = leaveApps.find(l => l.date === dateStr)
 
-    let label = ''
-    let labelColor = 'text-gray-400' // マスタデータはデフォルト灰色
+    let scheduleLabel = ''
+    let scheduleLabelColor = 'text-gray-400'
     let bgColor = ''
     
     // 優先度1: 休暇申請 (pending=黄色背景, approved=緑背景)
     if (leave) {
         const shortName = leave.leave_type.replace('年次有給休暇', '年休').replace('休暇', '')
         if (leave.status === 'pending') {
-            label = `${shortName}(仮)`
-            labelColor = 'text-yellow-800 font-bold'
-            bgColor = 'bg-yellow-100'
+            scheduleLabel = `${shortName}(仮)`
+            scheduleLabelColor = 'text-yellow-800 font-bold'
+            bgColor = 'bg-yellow-50'
         } else if (leave.status === 'approved') {
-            label = shortName
-            labelColor = 'text-green-700 font-bold'
-            bgColor = 'bg-green-100'
+            scheduleLabel = shortName
+            scheduleLabelColor = 'text-green-700 font-bold'
+            bgColor = 'bg-green-50'
         } else if (leave.status === 'rejected') {
-            label = `${shortName}(否)`
-            labelColor = 'text-gray-400'
+            scheduleLabel = `${shortName}(否)`
+            scheduleLabelColor = 'text-gray-400'
         }
     } 
     // 優先度2: ユーザー変更の勤務パターン（黒字）
     else if (schedule?.work_pattern_code) { 
-        label = schedule.work_pattern_code
-        labelColor = 'text-black font-bold' // ユーザー変更は黒字
-        if (label.includes('休')) labelColor = 'text-red-600 font-bold'
+        scheduleLabel = schedule.work_pattern_code
+        scheduleLabelColor = 'text-slate-700 font-bold'
+        if (scheduleLabel.includes('休')) scheduleLabelColor = 'text-red-600 font-bold'
     } 
     // 優先度3: マスタ勤務パターン（灰色）
     else if (master?.work_pattern_code) { 
-        label = master.work_pattern_code
-        labelColor = 'text-gray-400' // マスタは灰色
-        if (label.includes('休')) labelColor = 'text-red-400'
+        scheduleLabel = master.work_pattern_code
+        scheduleLabelColor = 'text-gray-400 text-xs'
+        if (scheduleLabel.includes('休')) scheduleLabelColor = 'text-red-300'
     } 
     // 優先度4: 休日カレンダー
     else { 
         if (calData?.day_type?.includes('休')) { 
-            label = '休'
-            labelColor = 'text-red-600 font-bold'
+            scheduleLabel = '休'
+            scheduleLabelColor = 'text-red-500 font-bold'
+            bgColor = 'bg-red-50'
         } 
     }
 
-    // 手当申請がある場合は背景を薄い灰色に
-    if (allowance && !bgColor) {
-        bgColor = 'bg-slate-50'
-    }
-
     return ( 
-        <div className={`flex flex-col items-center justify-start h-8 w-full rounded ${bgColor}`}>
-            {label && <span className={`text-[10px] leading-none ${labelColor}`}>{label}</span>}
-            {allowance && <span className="text-[9px] font-bold text-blue-600 leading-tight -mt-0.5">¥{allowance.amount.toLocaleString()}</span>}
+        <div className={`flex flex-col items-start justify-start w-full h-full p-1 ${bgColor} rounded-lg`}>
+            {/* 勤務パターン/休暇 */}
+            {scheduleLabel && (
+                <div className={`px-2 py-0.5 rounded-md ${leave ? 'bg-yellow-200' : leave?.status === 'approved' ? 'bg-green-200' : ''}`}>
+                    <span className={`text-xs ${scheduleLabelColor}`}>{scheduleLabel}</span>
+                </div>
+            )}
+            
+            {/* 手当金額 */}
+            {allowance && (
+                <div className="mt-1 px-2 py-0.5 bg-blue-100 rounded-md">
+                    <span className="text-xs font-bold text-blue-700">¥{allowance.amount.toLocaleString()}</span>
+                </div>
+            )}
+            
+            {/* 登録済みマーク */}
+            {(schedule || allowance || leave) && (
+                <div className="absolute bottom-1 right-1">
+                    <div className="w-1.5 h-1.5 bg-blue-500 rounded-full"></div>
+                </div>
+            )}
         </div> 
     )
   }
@@ -504,62 +528,101 @@ export default function Home() {
   const currentPatternDetail = workPatterns.find(p => p.code === selectedPattern)
   
   return (
-    <div className="min-h-screen bg-slate-50 pb-20">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
        {isAdmin && <div className="bg-slate-800 text-white text-center py-3 text-sm font-bold shadow-md"><a href="/admin" className="underline hover:text-blue-300 transition">事務担当者ページへ</a></div>}
 
-      <div className="bg-white px-6 py-4 rounded-b-3xl shadow-sm mb-6 sticky top-0 z-10">
-        <div className="absolute right-4 top-4 flex gap-2">
-            {/* ★氏名登録ボタン */}
-            <button onClick={() => setShowProfileModal(true)} className="text-xs font-bold text-slate-500 bg-slate-100 px-3 py-2 rounded-full border border-slate-200">
-                {userName ? `👤 ${userName}` : '⚙️ 氏名登録'}
-            </button>
-            <button onClick={handleLogout} className="text-xs font-bold text-slate-400 bg-slate-100 px-3 py-2 rounded-full border border-slate-200">ログアウト</button>
-        </div>
-
-        <div className="flex flex-col items-center mt-6">
-          <div className="flex items-center gap-4 mb-2">
-            <button onClick={handlePrevMonth} className="text-slate-400 p-2 text-xl font-bold">‹</button>
-            <h2 className="text-sm text-slate-500 font-bold">{selectedDate.getFullYear()}年 {selectedDate.getMonth() + 1}月</h2>
-            <button onClick={handleNextMonth} className="text-slate-400 p-2 text-xl font-bold">›</button>
+      {/* ヘッダー */}
+      <div className="bg-white shadow-sm border-b border-slate-200 sticky top-0 z-20">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+          <div className="flex justify-between items-center">
+            <div className="flex items-center gap-6">
+              <div className="flex items-center gap-3">
+                <button onClick={handlePrevMonth} className="text-slate-400 hover:text-slate-600 p-2 text-2xl font-bold transition">‹</button>
+                <h2 className="text-xl font-bold text-slate-800">{selectedDate.getFullYear()}年 {selectedDate.getMonth() + 1}月</h2>
+                <button onClick={handleNextMonth} className="text-slate-400 hover:text-slate-600 p-2 text-2xl font-bold transition">›</button>
+              </div>
+              <div className="text-3xl font-extrabold text-blue-600">¥{calculateMonthTotal().toLocaleString()}</div>
+            </div>
+            
+            <div className="flex items-center gap-3">
+              {/* 申請ステータス */}
+              <div className="flex items-center gap-2">
+                  {allowanceStatus === 'approved' && <span className="bg-green-100 text-green-700 px-3 py-1 rounded-full text-xs font-bold">💰 承認済</span>}
+                  {allowanceStatus === 'submitted' && <span className="bg-yellow-100 text-yellow-700 px-3 py-1 rounded-full text-xs font-bold">💰 申請中</span>}
+                  {allowanceStatus === 'draft' && !isAllowLocked && <button onClick={() => handleSubmit('allowance')} className="text-xs font-bold text-white bg-blue-600 px-4 py-2 rounded-full hover:bg-blue-700 shadow-sm transition">💰 申請</button>}
+              </div>
+              <div className="flex items-center gap-2">
+                  {scheduleStatus === 'approved' && <span className="bg-green-100 text-green-700 px-3 py-1 rounded-full text-xs font-bold">⏰ 承認済</span>}
+                  {scheduleStatus === 'submitted' && <span className="bg-yellow-100 text-yellow-700 px-3 py-1 rounded-full text-xs font-bold">⏰ 申請中</span>}
+                  {scheduleStatus === 'draft' && !isSchedLocked && <button onClick={() => handleSubmit('schedule')} className="text-xs font-bold text-white bg-green-600 px-4 py-2 rounded-full hover:bg-green-700 shadow-sm transition">⏰ 申請</button>}
+              </div>
+              <button onClick={() => setShowProfileModal(true)} className="text-xs font-bold text-slate-500 bg-slate-100 px-3 py-2 rounded-full border border-slate-200 hover:bg-slate-200 transition">
+                  {userName ? `👤 ${userName}` : '⚙️ 氏名登録'}
+              </button>
+              <button onClick={handleLogout} className="text-xs font-bold text-slate-400 bg-slate-100 px-3 py-2 rounded-full border border-slate-200 hover:bg-slate-200 transition">ログアウト</button>
+            </div>
           </div>
-          <h1 className="text-4xl font-extrabold text-slate-800">¥{calculateMonthTotal().toLocaleString()}</h1>
-          
-          <div className="mt-3 flex flex-col gap-2 items-center w-full">
-              <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-slate-500 w-12 text-right">手当:</span>
-                  {allowanceStatus === 'approved' && <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-bold">🈴 承認済</span>}
-                  {allowanceStatus === 'submitted' && <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded text-xs font-bold">⏳ 申請中</span>}
-                  {allowanceStatus === 'draft' && !isAllowLocked && <button onClick={() => handleSubmit('allowance')} className="text-xs font-bold text-white bg-blue-600 px-3 py-1 rounded-full hover:bg-blue-700 shadow-sm">💰 申請</button>}
-                  {allowanceStatus === 'draft' && isAllowLocked && <span className="text-xs text-slate-400">締切済(ロック)</span>}
+          {!isSchedLocked && <button onClick={handleBulkRegister} className="mt-2 text-xs text-slate-400 underline hover:text-slate-600 transition">一括登録はこちら</button>}
+        </div>
+      </div>
+
+      {/* メインカレンダー表示 */}
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="bg-white rounded-2xl shadow-lg p-6">
+          <Calendar 
+            onChange={(val) => handleDateClick(val as Date)} 
+            value={selectedDate} 
+            activeStartDate={selectedDate} 
+            onActiveStartDateChange={({ activeStartDate }) => activeStartDate && setSelectedDate(activeStartDate)} 
+            locale="ja-JP" 
+            tileContent={getTileContent} 
+            className="w-full border-none calendar-large" 
+          />
+        </div>
+        
+        {/* 月次サマリー */}
+        <div className="mt-8 bg-white rounded-2xl shadow-lg p-6">
+          <h3 className="font-bold text-slate-700 text-lg mb-4">{selectedDate.getMonth() + 1}月の手当履歴</h3>
+          <div className="space-y-2">
+            {allowances.filter(i => { const d = new Date(i.date); return d.getMonth() === selectedDate.getMonth() && d.getFullYear() === selectedDate.getFullYear() }).map((item) => (
+              <div key={item.id} className="bg-slate-50 p-4 rounded-xl flex justify-between items-center border border-slate-100 hover:border-slate-300 transition">
+                <div className="flex items-center gap-4">
+                  <span className="font-bold text-slate-700 text-lg">{item.date.split('-')[2]}日</span>
+                  <span className="text-sm text-slate-500">{item.activity_type}</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="font-bold text-slate-700 text-lg">¥{item.amount.toLocaleString()}</span>
+                  {!isAllowLocked && <button onClick={() => handleDelete(item.id, item.date)} className="text-slate-300 hover:text-red-500 transition text-xl">🗑</button>}
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-slate-500 w-12 text-right">勤務表:</span>
-                  {scheduleStatus === 'approved' && <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-bold">🈴 承認済</span>}
-                  {scheduleStatus === 'submitted' && <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded text-xs font-bold">⏳ 申請中</span>}
-                  {scheduleStatus === 'draft' && !isSchedLocked && <button onClick={() => handleSubmit('schedule')} className="text-xs font-bold text-white bg-green-600 px-3 py-1 rounded-full hover:bg-green-700 shadow-sm">⏰ 申請</button>}
-                  {scheduleStatus === 'draft' && isSchedLocked && <span className="text-xs text-slate-400">締切済(ロック)</span>}
-              </div>
-              {!isSchedLocked && <button onClick={handleBulkRegister} className="mt-1 text-xs text-slate-400 underline">一括登録はこちら</button>}
+            ))}
+            {allowances.filter(i => { const d = new Date(i.date); return d.getMonth() === selectedDate.getMonth() && d.getFullYear() === selectedDate.getFullYear() }).length === 0 && (
+              <div className="text-center py-8 text-slate-400">まだ手当の登録がありません</div>
+            )}
           </div>
         </div>
       </div>
 
-      <div className="px-4 max-w-md mx-auto space-y-6">
-        <div className="bg-white p-4 rounded-3xl shadow-sm">
-          <Calendar onChange={(val) => setSelectedDate(val as Date)} value={selectedDate} activeStartDate={selectedDate} onActiveStartDateChange={({ activeStartDate }) => activeStartDate && setSelectedDate(activeStartDate)} locale="ja-JP" tileContent={getTileContent} className="w-full border-none" />
-        </div>
-
-        <div className={`p-6 rounded-3xl shadow-sm border ${isSchedLocked && isAllowLocked ? 'bg-slate-100 border-slate-300' : isRegistered ? 'bg-green-50 border-green-200' : 'bg-white border-slate-200'}`}>
-          <div className="flex justify-between items-center mb-4 border-b pb-2">
-            <h2 className="font-bold text-slate-700 text-sm">{selectedDate.getMonth() + 1}/{selectedDate.getDate()} の勤務・手当</h2>
-            <div className="flex gap-2">
-                {isSchedLocked && <span className="text-xs px-2 py-1 rounded font-bold bg-gray-100 text-gray-500">⏰ ロック</span>}
-                {isAllowLocked && <span className="text-xs px-2 py-1 rounded font-bold bg-gray-100 text-gray-500">💰 ロック</span>}
-                <span className={`text-xs px-2 py-1 rounded font-bold ${isRegistered ? 'bg-green-200 text-green-800' : 'bg-slate-200 text-slate-500'}`}>{isRegistered ? '登録済' : '未登録'}</span>
+      {/* 入力フォームモーダル */}
+      {showInputModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowInputModal(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            {/* モーダルヘッダー */}
+            <div className="sticky top-0 bg-white border-b border-slate-200 px-6 py-4 flex justify-between items-center rounded-t-2xl">
+              <div>
+                <h2 className="font-bold text-slate-800 text-lg">{selectedDate.getMonth() + 1}月{selectedDate.getDate()}日 ({['日', '月', '火', '水', '木', '金', '土'][selectedDate.getDay()]}) の入力</h2>
+                <div className="flex gap-2 mt-2">
+                  {isSchedLocked && <span className="text-xs px-2 py-1 rounded font-bold bg-gray-100 text-gray-500">⏰ ロック</span>}
+                  {isAllowLocked && <span className="text-xs px-2 py-1 rounded font-bold bg-gray-100 text-gray-500">💰 ロック</span>}
+                  <span className={`text-xs px-2 py-1 rounded font-bold ${isRegistered ? 'bg-green-200 text-green-800' : 'bg-slate-200 text-slate-500'}`}>{isRegistered ? '登録済' : '未登録'}</span>
+                </div>
+              </div>
+              <button onClick={() => setShowInputModal(false)} className="text-slate-400 hover:text-slate-600 text-2xl font-bold">×</button>
             </div>
-          </div>
 
-          <form onSubmit={handleSave} className={`flex flex-col gap-4 ${isSchedLocked && isAllowLocked ? 'opacity-60 pointer-events-none' : ''}`}>
+            {/* モーダルコンテンツ */}
+            <div className="p-6">
+              <form onSubmit={handleSave} className={`flex flex-col gap-4 ${isSchedLocked && isAllowLocked ? 'opacity-60 pointer-events-none' : ''}`}>
             {/* 勤務表エリア */}
             <div className={`bg-white p-3 rounded-xl border ${isSchedLocked ? 'border-gray-200 opacity-60 pointer-events-none bg-gray-50' : 'border-slate-200'}`}>
               <label className="block text-xs font-bold text-black mb-1">勤務パターン {isSchedLocked && '(編集不可)'}</label>
@@ -846,25 +909,15 @@ export default function Home() {
             </div>
 
             {(!isSchedLocked || !isAllowLocked) && (
-                <button type="submit" className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 shadow-md">
-                    この内容で保存する
+                <button type="submit" className="w-full bg-blue-600 text-white font-bold py-4 rounded-xl hover:bg-blue-700 shadow-md text-lg">
+                    💾 この内容で保存する
                 </button>
             )}
           </form>
-        </div>
-
-        <div className="space-y-2 pb-10">
-            <h3 className="font-bold text-slate-400 text-xs px-2">{selectedDate.getMonth() + 1}月の手当履歴</h3>
-            {allowances.filter(i => { const d = new Date(i.date); return d.getMonth() === selectedDate.getMonth() && d.getFullYear() === selectedDate.getFullYear() }).map((item) => (
-            <div key={item.id} className="bg-white p-3 rounded-xl shadow-sm flex justify-between items-center border border-slate-100">
-                <div className="flex items-center gap-3"><span className="font-bold text-slate-700 text-sm">{item.date.split('-')[2]}日</span><span className="text-xs text-slate-500">{item.activity_type}</span></div>
-                <div className="flex items-center gap-2"><span className="font-bold text-slate-700 text-sm">¥{item.amount.toLocaleString()}</span>
-                    {!isAllowLocked && <button onClick={() => handleDelete(item.id, item.date)} className="text-slate-300 hover:text-red-500">🗑</button>}
-                </div>
             </div>
-            ))}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* ★氏名登録モーダル */}
       {showProfileModal && (

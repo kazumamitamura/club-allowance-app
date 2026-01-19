@@ -80,4 +80,38 @@ body {
 .react-calendar__tile:enabled:focus {
   background-color: #f1f5f9;
   border-radius: 12px;
+  cursor: pointer;
+  transform: translateY(-2px);
+  transition: all 0.2s ease;
+}
+
+/* 大型カレンダー用スタイル */
+.calendar-large .react-calendar__tile {
+  min-height: 100px !important;
+  padding: 8px !important;
+  position: relative;
+  align-items: flex-start !important;
+  justify-content: flex-start !important;
+}
+
+.calendar-large .react-calendar__month-view__days__day {
+  border: 1px solid #e2e8f0;
+}
+
+.calendar-large .react-calendar__tile--now {
+  border: 2px solid #3b82f6;
+}
+
+.calendar-large .react-calendar__tile--active {
+  border: 2px solid #1e40af;
+}
+
+/* 日曜日 */
+.react-calendar__month-view__days__day--weekend:first-child {
+  color: #dc2626;
+}
+
+/* 土曜日 */
+.react-calendar__month-view__days__day--weekend:last-child {
+  color: #2563eb;
 }
